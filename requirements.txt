@@ -1,0 +1,27 @@
+# 强化学习算法库依赖
+
+# 核心依赖
+torch>=2.0.0
+numpy>=1.24.0
+
+# 强化学习环境
+gymnasium>=0.29.0
+
+# 可视化与进度条
+matplotlib>=3.7.0
+tqdm>=4.65.0
+
+# 可选依赖（根据具体算法需要）
+# flappy_bird_gymnasium  # 用于FlappyBird环境
+# box2d-py               # 用于Box2D环境
+# pygame                 # 用于游戏环境
+# mujoco                 # 用于Mujoco环境（需要许可证）
+
+# 开发工具
+# tensorboard>=2.13.0
+# wandb>=0.15.0
+
+# 安装命令：
+# pip install -r requirements.txt
+
+# 注意：部分环境可能需要额外安装，请参考各算法文件夹内的说明
