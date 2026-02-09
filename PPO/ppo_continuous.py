@@ -11,7 +11,7 @@ import gymnasium as gym
 from gymnasium.wrappers import RescaleAction, NormalizeObservation, NormalizeReward, RecordEpisodeStatistics
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import GLUBlock, ReplayBuffer, PPOAgentBase, NNBase
+from common import ResidualBlock, ReplayBuffer, PPOAgentBase, NNBase
 from dataclasses import dataclass, asdict
 
 
@@ -29,45 +29,18 @@ class Config:
     gp: float = 1
 
 
-# class Block(nn.Module):
-#     def __init__(self, in_dim, out_dim, dropout=0.):
-#         super().__init__()
-#         self.gate_proj = nn.Sequential(nn.Linear(in_dim, out_dim, bias=True),
-#                                        nn.Sigmoid())
-#         self.v_proj = nn.Sequential(nn.Linear(in_dim, out_dim, bias=True))
-#         self.o_proj = nn.Sequential(nn.Linear(out_dim, out_dim, bias=True))
-#         self.in_dim = in_dim
-#         self.out_dim = out_dim
-#         self.norm = nn.RMSNorm(out_dim)
-
-#     def forward(self, x):
-#         if self.in_dim == self.out_dim:
-#             return F.silu(x + self.o_proj(self.norm(self.gate_proj(x) * self.v_proj(x))))
-#         return F.silu(self.o_proj(self.norm(self.gate_proj(x) * self.v_proj(x))))
-
-class Block(nn.Module):
-    def __init__(self, in_dim, out_dim):
-        super().__init__()
-        self.net = nn.Sequential(nn.Linear(in_dim, out_dim),
-                                #  nn.LayerNorm(out_dim),
-                                 nn.Tanh())
-
-    def forward(self, x):
-        return self.net(x)
-
-
 class ContinuousPPO(NNBase):
     def __init__(self, lr, obs_dim, h_dim, action_dim, action_limit=1., computes_grad=True, device='cpu'):
         super().__init__()
-        self.hidden = nn.Sequential(Block(obs_dim, h_dim),
-                                    Block(h_dim, h_dim))
-        self.b_alpha = nn.Sequential(Block(h_dim, h_dim),
-                                     nn.Linear(h_dim, action_dim))
+        self.hidden = nn.Sequential(ResidualBlock(obs_dim, h_dim),
+                                    ResidualBlock(h_dim, h_dim))
+        self.b_alpha = nn.Sequential(ResidualBlock(h_dim, h_dim),
+                                     ResidualBlock(h_dim, action_dim))
         self.b_beta = deepcopy(self.b_alpha)
-        self.value = nn.Sequential(Block(obs_dim, h_dim),
-                                   Block(h_dim, h_dim),
-                                   Block(h_dim, h_dim),
-                                   nn.Linear(h_dim, 1))
+        self.value = nn.Sequential(ResidualBlock(obs_dim, h_dim),
+                                   ResidualBlock(h_dim, h_dim),
+                                   ResidualBlock(h_dim, h_dim),
+                                   ResidualBlock(h_dim, 1))
         # self.value = nn.Linear(obs_dim, 1)
         self.opt = AdamW(self.parameters(), lr, weight_decay=0.0, eps=1e-5)
         self.obs_dim = obs_dim
@@ -81,7 +54,6 @@ class ContinuousPPO(NNBase):
 
     def init_weights(self, m):
         if isinstance(m, nn.Linear):
-            # nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
             nn.init.orthogonal_(m.weight)
             nn.init.constant_(m.bias, 0)
 
@@ -182,7 +154,8 @@ class PPOAgent(PPOAgentBase):
         with torch.no_grad():
             values = self.net.critic(states).reshape(-1)
             next_values = self.net.critic(next_states).reshape(-1)
-            advantages = self.GAE(self.discount, self.gaeLambda, rewards.reshape(-1), values, next_values, (terminated + truncated).bool().int()).reshape(-1, 1)
+            advantages = self.GAE(self.discount, self.gaeLambda, rewards.reshape(-1), values,
+                                  next_values, (terminated + truncated).bool().int()).reshape(-1, 1)
             td_target = advantages + values.reshape(-1, 1)
             _, log_probs = self.net.get_dist_logp(states, actions)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -213,7 +186,7 @@ class PPOAgent(PPOAgentBase):
 
                 loss = actor_loss + self.vf_coef * critic_loss + entropy_loss
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
+                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.net.opt.step()
         self.buffer.reset()
 
@@ -221,7 +194,7 @@ class PPOAgent(PPOAgentBase):
 if __name__ == "__main__":
     update = 1
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    env = gym.make("Pendulum-v1", render_mode='human' if not update else None)
+    env = gym.make("InvertedPendulum-v5", render_mode='human' if not update else None)
     env = RescaleAction(env, -1, 1)
     env = RecordEpisodeStatistics(env)
     env = NormalizeObservation(env)

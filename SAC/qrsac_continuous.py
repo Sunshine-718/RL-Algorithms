@@ -13,7 +13,7 @@ import gymnasium as gym
 from gymnasium.wrappers import RescaleAction
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import NetworkBase, AgentBase, quantile_huber_loss
+from common import NetworkBase, AgentBase, quantile_huber_loss, ResidualBlock
 
 
 @dataclass
@@ -31,28 +31,14 @@ class Config:
 class ContinuousSAC(NetworkBase):
     def __init__(self, actor_lr, critic_lr, obs_dim, h_dim, action_dim, action_limit=1., dropout=0., num_quantiles=51, alpha=0.2, alpha_lr=1e-2, computes_grad=True, device='cpu'):
         super().__init__()
-        self.hidden = nn.Sequential(nn.Linear(obs_dim, h_dim),
-                                    nn.LayerNorm(h_dim),
-                                    nn.Dropout(dropout),
-                                    nn.SiLU(True),
-                                    nn.Linear(h_dim, h_dim),
-                                    nn.LayerNorm(h_dim),
-                                    nn.Dropout(dropout),
-                                    nn.SiLU(True))
-        self.b_alpha = nn.Sequential(nn.Linear(h_dim, h_dim),
-                                     nn.LayerNorm(h_dim),
-                                     nn.SiLU(True),
-                                     nn.Linear(h_dim, action_dim))
+        self.hidden = nn.Sequential(ResidualBlock(obs_dim, h_dim, dropout),
+                                    ResidualBlock(h_dim, h_dim, dropout),)
+        self.b_alpha = nn.Sequential(ResidualBlock(h_dim, h_dim, dropout),
+                                     ResidualBlock(h_dim, action_dim))
         self.b_beta = deepcopy(self.b_alpha)
-        self.q1 = nn.Sequential(nn.Linear(obs_dim + action_dim, h_dim),
-                                nn.LayerNorm(h_dim),
-                                nn.Dropout(dropout),
-                                nn.SiLU(True),
-                                nn.Linear(h_dim, h_dim),
-                                nn.LayerNorm(h_dim),
-                                nn.Dropout(dropout),
-                                nn.SiLU(True),
-                                nn.Linear(h_dim, num_quantiles))
+        self.q1 = nn.Sequential(ResidualBlock(obs_dim + action_dim, h_dim),
+                                ResidualBlock(h_dim, h_dim),
+                                ResidualBlock(h_dim, num_quantiles))
         self.q2 = deepcopy(self.q1)
         self.alpha = nn.Parameter(torch.tensor([[math.log(alpha)]]), requires_grad=True)
         self.alpha_opt = SGD([self.alpha], lr=alpha_lr)
@@ -61,9 +47,6 @@ class ContinuousSAC(NetworkBase):
         self.action_limit = action_limit
         self.num_quantiles = num_quantiles
         self.apply(self.init_weights)
-
-        torch.nn.init.constant_(self.b_alpha[-1].weight, 0)
-        torch.nn.init.constant_(self.b_beta[-1].weight, 0)
 
         self.actor_opt = NAdam([{'params': self.hidden.parameters()},
                                 {'params': self.b_alpha.parameters()},
@@ -76,7 +59,7 @@ class ContinuousSAC(NetworkBase):
 
     def init_weights(self, m):
         if isinstance(m, nn.Linear):
-            nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+            nn.init.orthogonal_(m.weight)
             nn.init.constant_(m.bias, 0)
 
     def actor(self, state, deterministic=False):
@@ -131,7 +114,7 @@ class ContinuousSACAgent(AgentBase):
         self.net.train()
         if action.numel() == 1:
             return float(action.cpu())
-        return action.cpu().numpy()
+        return action.cpu().numpy().squeeze(0)
 
     @property
     @torch.no_grad()
@@ -159,6 +142,7 @@ class ContinuousSACAgent(AgentBase):
                 critic_loss = quantile_huber_loss(q1, td_target, self.qr_tau) + \
                     quantile_huber_loss(q2, td_target, self.qr_tau)
                 critic_loss.backward()
+                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.net.critic_opt.step()
 
                 self.net.actor_opt.zero_grad()
@@ -167,31 +151,32 @@ class ContinuousSACAgent(AgentBase):
                 q_pi = torch.minimum(q1, q2)
                 actor_loss = -(q_pi + self.alpha * entropy.view(-1, 1)).mean()
                 actor_loss.backward()
+                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.net.actor_opt.step()
 
                 alpha_loss = torch.exp(self.net.alpha).clamp_max(1.) * (entropy.mean().detach() - self.target_entropy)
                 self.net.alpha_opt.zero_grad()
                 alpha_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.net.alpha, 0.1)
+                nn.utils.clip_grad_norm_(self.net.alpha, 0.1)
                 self.net.alpha_opt.step()
                 self.soft_update()
 
 
 if __name__ == "__main__":
-    update = 1
+    update = 0
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    env = gym.make("Pendulum-v1", render_mode='human' if not update else None)
+    env = gym.make("BipedalWalker-v3", hardcore=True, render_mode='human' if not update else None)
     env = RescaleAction(env, -1, 1)
-    ac = ContinuousSAC(1e-3, 1e-3, env.observation_space.shape[0],
+    ac = ContinuousSAC(1e-3, 3e-3, env.observation_space.shape[0],
                        256, env.action_space.shape[0], 1, 0, 51, 0.2, 1e-2, device=device)
     config = Config()
     agent = ContinuousSACAgent('test', ac, config)
-    # agent.load()
+    agent.load()
     agent.n_step = 5
     reward_container = []
     Loss = []
     td_error = []
-    max_steps = 1000
+    max_steps = 1600
     interval = 10
     avg = np.zeros(interval)
     best_avg = -float('inf')
@@ -206,6 +191,8 @@ if __name__ == "__main__":
             j += 1
             action = agent.action(state, not update)
             next_state, reward, terminated, truncated, _ = env.step(action)
+            if reward == -100:
+                reward = -10
             if bool(update):
                 agent.cache(state, action, reward, next_state, terminated, truncated)
             episode_reward_sum += reward
@@ -231,5 +218,5 @@ if __name__ == "__main__":
             if res > best_avg:
                 best_avg = res
         iterator.set_description(
-            f'episode reward: {episode_reward_sum: .0f}, avg: {res: .0f}, best avg: {best_avg: .0f}, episode_length: {j}, alpha: {agent.alpha: .4f}')
+            f'episode reward: {episode_reward_sum: .0f}, avg: {res: .0f}, best avg: {best_avg: .0f}, episode_length: {j}, alpha: {agent.alpha: .4f}, avg step reward: {episode_reward_sum / j: .3f}')
     env.close()

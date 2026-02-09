@@ -148,6 +148,7 @@ class TD3Agent(AgentBase):
                 self.net.critic_opt.zero_grad()
                 critic_loss = F.smooth_l1_loss(q1, td_target) + F.smooth_l1_loss(q2, td_target)
                 critic_loss.backward()
+                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.net.critic_opt.step()
                 self.update_step += 1
                 if self.update_step % self.update_actor_interval == 0:
@@ -156,6 +157,7 @@ class TD3Agent(AgentBase):
                     q = torch.minimum(q1, q2)
                     actor_loss = -torch.mean(q)
                     actor_loss.backward()
+                    nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                     self.net.actor_opt.step()
                 self.soft_update()
             self.decay_noise()

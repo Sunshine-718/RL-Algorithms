@@ -10,7 +10,7 @@ from torch.distributions import Categorical
 import gymnasium as gym
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import ReplayBuffer, GLUBlock, PPOAgentBase, NNBase, quantile_huber_loss
+from common import ReplayBuffer, ResidualBlock, PPOAgentBase, NNBase, quantile_huber_loss
 from dataclasses import dataclass, asdict
 
 
@@ -31,20 +31,20 @@ class Config:
 class DiscreteQRPPO(NNBase):
     def __init__(self, lr, obs_dim, h_dim, action_dim, num_quantiles=51, computes_grad=True, device='cpu'):
         super().__init__()
-        self.policy = nn.Sequential(GLUBlock(obs_dim, h_dim),
-                                    GLUBlock(h_dim, h_dim),
-                                    nn.Linear(h_dim, action_dim),
+        self.policy = nn.Sequential(ResidualBlock(obs_dim, h_dim),
+                                    ResidualBlock(h_dim, h_dim),
+                                    ResidualBlock(h_dim, action_dim),
                                     nn.LogSoftmax(dim=-1))
-        self.value = nn.Sequential(GLUBlock(obs_dim, h_dim),
-                                   GLUBlock(h_dim, h_dim),
-                                   nn.Linear(h_dim, num_quantiles))
+        self.value = nn.Sequential(ResidualBlock(obs_dim, h_dim),
+                                   ResidualBlock(h_dim, h_dim),
+                                   ResidualBlock(h_dim, num_quantiles))
         self.opt = NAdam(self.parameters(), lr, weight_decay=0.01, decoupled_weight_decay=True)
         self.obs_dim = obs_dim
         self.action_dim = action_dim
         self.num_quantiles = num_quantiles
         self.device = device
 
-        torch.nn.init.constant_(self.policy[-2].weight, 0)
+        torch.nn.init.constant_(self.policy[-2].linear.weight, 0)
 
         self.computes_grad(computes_grad)
         self.apply(self.init_weights)
@@ -52,7 +52,7 @@ class DiscreteQRPPO(NNBase):
 
     def init_weights(self, m):
         if isinstance(m, nn.Linear):
-            nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+            nn.init.orthogonal_(m.weight)
             nn.init.constant_(m.bias, 0)
 
     def actor(self, state):
@@ -163,7 +163,7 @@ class QRPPOAgent(PPOAgentBase):
 
                 loss = actor_loss + self.vf_coef * critic_loss + entropy_loss
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
+                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.net.opt.step()
         self.buffer.reset()
 
@@ -173,7 +173,7 @@ if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     env = env = gym.make("CartPole-v1", render_mode='human' if not update else None).unwrapped
     # env = RescaleAction(env, -1, 1)
-    ac = DiscreteQRPPO(3e-4, env.observation_space.shape[0], 128, env.action_space.n, 51, True, device)
+    ac = DiscreteQRPPO(1e-4, env.observation_space.shape[0], 128, env.action_space.n, 51, True, device)
     config = Config()
     agent = QRPPOAgent('test', ac, config)
     # agent.load()

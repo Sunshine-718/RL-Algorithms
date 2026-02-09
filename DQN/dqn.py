@@ -10,7 +10,7 @@ from copy import deepcopy
 import gymnasium as gym
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import GLUBlock, NNBase, DQNAgentBase
+from common import ResidualBlock, NNBase, DQNAgentBase
 import flappy_bird_gymnasium
 
 
@@ -31,18 +31,17 @@ class Config:
 class DuelingDQN(NNBase):
     def __init__(self, lr, obs_dim, h_dim, num_actions, dropout=0., computes_grad=True, device='cpu'):
         super().__init__()
-        self.in_block = GLUBlock(obs_dim, h_dim, dropout)
-        self.block1 = GLUBlock(h_dim, h_dim, dropout)
-        self.a_block1 = GLUBlock(h_dim, h_dim, dropout)
-        self.v_block1 = GLUBlock(h_dim, h_dim, dropout)
-        self.a_out = nn.Linear(h_dim, num_actions)
-        self.v_out = nn.Linear(h_dim, 1)
+        self.hidden = nn.Sequential(ResidualBlock(obs_dim, h_dim, dropout),
+                                    ResidualBlock(h_dim, h_dim, dropout))
+        self.v = nn.Sequential(ResidualBlock(h_dim, h_dim, dropout),
+                               ResidualBlock(h_dim, 1))
+        self.a = nn.Sequential(ResidualBlock(h_dim, h_dim, dropout),
+                               ResidualBlock(h_dim, num_actions))
         self.action_dim = num_actions
         self.obs_dim = obs_dim
         self.apply(self.init_weights)
 
-        # nn.init.constant_(self.v[-1].weight, 0)
-        nn.init.constant_(self.a_out.weight, 0)
+        nn.init.constant_(self.a[-1].linear.weight, 0)
 
         self.opt = self.configure_optimizer(0.01, lr)
         self.computes_grad(computes_grad)
@@ -51,17 +50,14 @@ class DuelingDQN(NNBase):
 
     def init_weights(self, m):
         if isinstance(m, nn.Linear):
-            nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+            nn.init.orthogonal_(m.weight)
             # if hasattr(m, 'bias'):
             #     nn.init.constant_(m.bias, 0)
 
     def forward(self, state):
-        hidden = F.silu(self.in_block(state))
-        hidden = F.silu(self.block1(hidden) + hidden)
-        v_hidden = F.silu(self.v_block1(hidden) + hidden)
-        v = self.v_out(v_hidden)
-        a_hidden = F.silu(self.a_block1(hidden) + hidden)
-        a = self.a_out(a_hidden)
+        hidden = self.hidden(state)
+        v = self.v(hidden)
+        a = self.a(hidden)
         q = v + (a - torch.mean(a, 1, keepdim=True))
         return q
 
@@ -120,6 +116,7 @@ class DoubleDQNAgent(DQNAgentBase):
                 self.net.train()
                 loss = self.loss(*self.buffer.sample(batch_size))
                 loss.backward()
+                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.net.opt.step()
                 self.soft_update()
             self.decay_noise()
@@ -127,7 +124,7 @@ class DoubleDQNAgent(DQNAgentBase):
 
 
 if __name__ == "__main__":
-    update = 0
+    update = 1
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     env = gym.make("FlappyBird-v0", render_mode='human' if not update else None, use_lidar=True).unwrapped
     action_dim = env.action_space.n
@@ -135,7 +132,7 @@ if __name__ == "__main__":
     Q = DuelingDQN(1e-3, obs_dim, 256, action_dim, 0., True, device)
     config = Config()
     agent = DoubleDQNAgent('test', Q, config)
-    agent.load()
+    # agent.load()
     agent.n_step = 5
     reward_container = []
     Loss = []

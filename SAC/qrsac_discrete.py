@@ -12,7 +12,7 @@ from torch.distributions import Categorical
 import gymnasium as gym
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import NetworkBase, AgentBase, quantile_huber_loss
+from common import NetworkBase, AgentBase, quantile_huber_loss, ResidualBlock
 
 
 @dataclass
@@ -30,24 +30,12 @@ class Config:
 class DiscreteSAC(NetworkBase):
     def __init__(self, actor_lr, critic_lr, obs_dim, h_dim, action_dim, dropout=0., alpha=0.2, alpha_lr=1e-2, num_quantiles=51, computes_grad=True, device='cpu'):
         super().__init__()
-        self.pi = nn.Sequential(nn.Linear(obs_dim, h_dim),
-                                nn.LayerNorm(h_dim),
-                                nn.Dropout(dropout),
-                                nn.SiLU(True),
-                                nn.Linear(h_dim, h_dim),
-                                nn.LayerNorm(h_dim),
-                                nn.Dropout(dropout),
-                                nn.SiLU(True),
-                                nn.Linear(h_dim, action_dim))
-        self.q1 = nn.Sequential(nn.Linear(obs_dim, h_dim),
-                                nn.LayerNorm(h_dim),
-                                nn.Dropout(dropout),
-                                nn.SiLU(True),
-                                nn.Linear(h_dim, h_dim),
-                                nn.LayerNorm(h_dim),
-                                nn.Dropout(dropout),
-                                nn.SiLU(True),
-                                nn.Linear(h_dim, action_dim * num_quantiles))
+        self.pi = nn.Sequential(ResidualBlock(obs_dim, h_dim, dropout),
+                                ResidualBlock(h_dim, h_dim, dropout),
+                                ResidualBlock(h_dim, action_dim))
+        self.q1 = nn.Sequential(ResidualBlock(obs_dim, h_dim, dropout=dropout),
+                                ResidualBlock(h_dim, h_dim, dropout=dropout),
+                                ResidualBlock(h_dim, action_dim * num_quantiles))
         self.q2 = deepcopy(self.q1)
         self.alpha = nn.Parameter(torch.tensor([[math.log(alpha)]]), requires_grad=True)
         self.alpha_opt = SGD([self.alpha], lr=alpha_lr)
@@ -56,7 +44,7 @@ class DiscreteSAC(NetworkBase):
         self.num_quantiles = num_quantiles
         self.apply(self.init_weights)
 
-        nn.init.constant_(self.pi[-1].weight, 0)
+        nn.init.constant_(self.pi[-1].linear.weight, 0)
 
         self.actor_opt = NAdam(self.pi.parameters(), lr=actor_lr, weight_decay=0.01, decoupled_weight_decay=True)
         self.critic_opt = NAdam([{'params': self.q1.parameters()}, {'params': self.q2.parameters()}],
@@ -67,7 +55,8 @@ class DiscreteSAC(NetworkBase):
 
     def init_weights(self, m):
         if isinstance(m, nn.Linear):
-            nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+            # nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+            nn.init.orthogonal_(m.weight)
             nn.init.constant_(m.bias, 0)
 
     def actor(self, state, deterministic=False):
@@ -149,6 +138,7 @@ class DiscreteSACAgent(AgentBase):
                 critic_loss = quantile_huber_loss(q1.gather(1, action).squeeze(1), td_target, self.qr_tau) + \
                     quantile_huber_loss(q2.gather(1, action).squeeze(1), td_target, self.qr_tau)
                 critic_loss.backward()
+                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.net.critic_opt.step()
 
                 self.net.q1.eval()
@@ -159,12 +149,13 @@ class DiscreteSACAgent(AgentBase):
                 q_pi = torch.minimum(q1, q2)
                 actor_loss = -(prob * (q_pi.mean(dim=-1).detach() + self.alpha * entropy)).sum(dim=1).mean()
                 actor_loss.backward()
+                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.net.actor_opt.step()
 
                 alpha_loss = (prob.detach() * (self.net.alpha.exp() * (entropy.detach() - self.target_entropy))).mean()
                 self.net.alpha_opt.zero_grad()
                 alpha_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.net.alpha, 0.1)
+                nn.utils.clip_grad_norm_(self.net.alpha, 0.1)
                 self.net.alpha_opt.step()
                 self.soft_update()
 
@@ -174,7 +165,8 @@ if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     env = env = gym.make("CartPole-v1", render_mode='human' if not update else None).unwrapped
     # env = RescaleAction(env, -1, 1)
-    ac = DiscreteSAC(1e-3, 3e-3, env.observation_space.shape[0], 128, env.action_space.n, 0, 0.2, 1e-2, 51, device=device)
+    ac = DiscreteSAC(1e-3, 3e-3, env.observation_space.shape[0],
+                     128, env.action_space.n, 0, 0.2, 1e-2, 51, device=device)
     config = Config()
     agent = DiscreteSACAgent('test', ac, config)
     # agent.load()
@@ -213,7 +205,7 @@ if __name__ == "__main__":
             agent.step()
         reward_container.append(episode_reward_sum)
         avg[i % interval] = episode_reward_sum
-        # agent.save()
+        agent.save()
         if i % interval == 0 and i != 0:
             plt.clf()
             plt.plot(reward_container, label='Reward')

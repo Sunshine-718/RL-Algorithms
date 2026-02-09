@@ -12,22 +12,33 @@ def quantile_huber_loss(pred, target, tau, kappa=1.0):
     return loss.mean()
 
 
-class GLUBlock(nn.Module):
-    def __init__(self, in_dim, out_dim, dropout=0.):
+class GLU(nn.Module):
+    def __init__(self, in_dim, out_dim):
         super().__init__()
-        self.gate_proj = nn.Sequential(nn.Linear(in_dim, out_dim, bias=True),
-                                       nn.Sigmoid())
-        self.v_proj = nn.Sequential(nn.Linear(in_dim, out_dim, bias=True))
-        self.o_proj = nn.Sequential(nn.Linear(out_dim, out_dim, bias=True),
-                                    nn.Dropout(dropout))
-        self.in_dim = in_dim
-        self.out_dim = out_dim
-        self.norm = nn.RMSNorm(out_dim)
+        self.gate = nn.Linear(in_dim, out_dim)
+        self.proj = nn.Linear(in_dim, out_dim)
 
     def forward(self, x):
-        if self.in_dim == self.out_dim:
-            return F.silu(x + self.o_proj(self.norm(self.gate_proj(x) * self.v_proj(x))))
-        return F.silu(self.o_proj(self.norm(self.gate_proj(x) * self.v_proj(x))))
+        return torch.sigmoid(self.gate(x)) * self.proj(x)
+
+
+class ResidualBlock(nn.Module):
+    def __init__(self, in_dim, out_dim, dropout=0.):
+        super().__init__()
+        self.glu = GLU(in_dim, out_dim)
+        self.linear = nn.Linear(out_dim, out_dim)
+        self.norm = nn.RMSNorm(in_dim, 1e-5)
+        self.dropout = nn.Dropout(dropout, inplace=True)
+        self.residual = in_dim == out_dim
+
+    def forward(self, x):
+        residual = 0
+        if self.residual:
+            residual = x
+        x = self.norm(x)
+        x = self.glu(x)
+        x = self.linear(x)
+        return self.dropout(x + residual)
 
 
 class NNBase(nn.Module):

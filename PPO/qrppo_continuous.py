@@ -11,7 +11,7 @@ import gymnasium as gym
 from gymnasium.wrappers import RescaleAction, NormalizeObservation, NormalizeReward, RecordEpisodeStatistics
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import GLUBlock, ReplayBuffer, PPOAgentBase, NNBase, quantile_huber_loss
+from common import ResidualBlock, ReplayBuffer, PPOAgentBase, NNBase, quantile_huber_loss
 from dataclasses import dataclass, asdict
 
 
@@ -29,45 +29,18 @@ class Config:
     gp: float = 1
 
 
-# class Block(nn.Module):
-#     def __init__(self, in_dim, out_dim, dropout=0.):
-#         super().__init__()
-#         self.gate_proj = nn.Sequential(nn.Linear(in_dim, out_dim, bias=True),
-#                                        nn.Sigmoid())
-#         self.v_proj = nn.Sequential(nn.Linear(in_dim, out_dim, bias=True))
-#         self.o_proj = nn.Sequential(nn.Linear(out_dim, out_dim, bias=True))
-#         self.in_dim = in_dim
-#         self.out_dim = out_dim
-#         self.norm = nn.RMSNorm(out_dim)
-
-#     def forward(self, x):
-#         if self.in_dim == self.out_dim:
-#             return F.silu(x + self.o_proj(self.norm(self.gate_proj(x) * self.v_proj(x))))
-#         return F.silu(self.o_proj(self.norm(self.gate_proj(x) * self.v_proj(x))))
-
-class Block(nn.Module):
-    def __init__(self, in_dim, out_dim):
-        super().__init__()
-        self.net = nn.Sequential(nn.Linear(in_dim, out_dim),
-                                #  nn.LayerNorm(out_dim),
-                                 nn.Tanh())
-
-    def forward(self, x):
-        return self.net(x)
-
-
 class ContinuousPPO(NNBase):
     def __init__(self, lr, obs_dim, h_dim, action_dim, action_limit=1., num_quantiles=51, computes_grad=True, device='cpu'):
         super().__init__()
-        self.hidden = nn.Sequential(Block(obs_dim, h_dim),
-                                    Block(h_dim, h_dim))
-        self.b_alpha = nn.Sequential(Block(h_dim, h_dim),
-                                     nn.Linear(h_dim, action_dim))
+        self.hidden = nn.Sequential(ResidualBlock(obs_dim, h_dim),
+                                    ResidualBlock(h_dim, h_dim))
+        self.b_alpha = nn.Sequential(ResidualBlock(h_dim, h_dim),
+                                     ResidualBlock(h_dim, action_dim))
         self.b_beta = deepcopy(self.b_alpha)
-        self.value = nn.Sequential(Block(obs_dim, h_dim),
-                                   Block(h_dim, h_dim),
-                                   Block(h_dim, h_dim),
-                                   nn.Linear(h_dim, num_quantiles))
+        self.value = nn.Sequential(ResidualBlock(obs_dim, h_dim),
+                                   ResidualBlock(h_dim, h_dim),
+                                   ResidualBlock(h_dim, h_dim),
+                                   ResidualBlock(h_dim, num_quantiles))
         # self.value = nn.Linear(obs_dim, 1)
         self.opt = AdamW(self.parameters(), lr, weight_decay=0.0, eps=1e-5)
         self.obs_dim = obs_dim
@@ -82,7 +55,6 @@ class ContinuousPPO(NNBase):
 
     def init_weights(self, m):
         if isinstance(m, nn.Linear):
-            # nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
             nn.init.orthogonal_(m.weight)
             nn.init.constant_(m.bias, 0)
 
@@ -217,13 +189,13 @@ class PPOAgent(PPOAgentBase):
 
                 loss = actor_loss + self.vf_coef * critic_loss + entropy_loss
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
+                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.net.opt.step()
         self.buffer.reset()
 
 
 if __name__ == "__main__":
-    update = 0
+    update = 1
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     env = gym.make("InvertedPendulum-v5", render_mode='human' if not update else None)
     env = RescaleAction(env, -1, 1)
@@ -233,7 +205,7 @@ if __name__ == "__main__":
     ac = ContinuousPPO(1e-4, env.observation_space.shape[0], 128, env.action_space.shape[0], 1, 51, True, device=device)
     config = Config()
     agent = PPOAgent('test', ac, config)
-    agent.load()
+    # agent.load()
     reward_container = []
     Loss = []
     td_error = []

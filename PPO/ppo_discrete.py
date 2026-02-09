@@ -6,7 +6,7 @@ import numpy as np
 from torch.optim import NAdam
 from copy import deepcopy
 from torch.distributions import Categorical
-from common import GLUBlock, ReplayBuffer, PPOAgentBase, NNBase
+from common import ResidualBlock, ReplayBuffer, PPOAgentBase, NNBase
 
 import gymnasium as gym
 from tqdm.auto import tqdm
@@ -31,19 +31,19 @@ class Config:
 class DiscretePPO(NNBase):
     def __init__(self, lr, obs_dim, h_dim, action_dim, computes_grad=True, device='cpu'):
         super().__init__()
-        self.policy = nn.Sequential(GLUBlock(obs_dim, h_dim),
-                                    GLUBlock(h_dim, h_dim),
-                                    nn.Linear(h_dim, action_dim),
+        self.policy = nn.Sequential(ResidualBlock(obs_dim, h_dim),
+                                    ResidualBlock(h_dim, h_dim),
+                                    ResidualBlock(h_dim, action_dim),
                                     nn.LogSoftmax(dim=-1))
-        self.value = nn.Sequential(GLUBlock(obs_dim, h_dim),
-                                   GLUBlock(h_dim, h_dim),
-                                   nn.Linear(h_dim, 1))
+        self.value = nn.Sequential(ResidualBlock(obs_dim, h_dim),
+                                   ResidualBlock(h_dim, h_dim),
+                                   ResidualBlock(h_dim, 1))
         self.opt = NAdam(self.parameters(), lr, weight_decay=0.01, decoupled_weight_decay=True)
         self.obs_dim = obs_dim
         self.action_dim = action_dim
         self.device = device
 
-        torch.nn.init.constant_(self.policy[-2].weight, 0)
+        torch.nn.init.constant_(self.policy[-2].linear.weight, 0)
 
         self.computes_grad(computes_grad)
         self.apply(self.init_weights)
@@ -51,7 +51,7 @@ class DiscretePPO(NNBase):
 
     def init_weights(self, m):
         if isinstance(m, nn.Linear):
-            nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+            nn.init.orthogonal_(m.weight)
             nn.init.constant_(m.bias, 0)
 
     def actor(self, state):
@@ -127,7 +127,8 @@ class PPOAgent(PPOAgentBase):
         with torch.no_grad():
             values = self.net.critic(states).reshape(-1)
             next_values = self.net.critic(next_states).reshape(-1)
-            advantages = self.GAE(self.discount, self.gaeLambda, rewards.reshape(-1), values, next_values, terminated).reshape(-1, 1)
+            advantages = self.GAE(self.discount, self.gaeLambda, rewards.reshape(-1),
+                                  values, next_values, terminated).reshape(-1, 1)
             td_target = advantages + values.reshape(-1, 1)
             _, old_log_probs = self.net.get_dist(states, actions)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -139,7 +140,7 @@ class PPOAgent(PPOAgentBase):
                 self.net.opt.zero_grad()
                 dist, log_probs = self.net.get_dist(state, action)
                 ratio = torch.exp(log_probs - old_logp)
-                
+
                 surr1 = ratio * adv
                 surr2 = torch.clamp(ratio, 1 - self.clip_coef, 1 + self.clip_coef) * adv
                 actor_loss = -torch.mean(torch.min(surr1, surr2))
@@ -159,7 +160,7 @@ class PPOAgent(PPOAgentBase):
 
                 loss = actor_loss + self.vf_coef * critic_loss + entropy_loss
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
+                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.net.opt.step()
         self.buffer.reset()
 

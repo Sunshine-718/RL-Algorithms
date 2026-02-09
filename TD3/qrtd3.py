@@ -152,6 +152,7 @@ class TD3Agent(AgentBase):
                 critic_loss = quantile_huber_loss(q1, td_target, self.qr_tau) + \
                     quantile_huber_loss(q2, td_target, self.qr_tau)
                 critic_loss.backward()
+                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.net.critic_opt.step()
                 self.update_step += 1
                 if self.update_step % self.update_actor_interval == 0:
@@ -160,6 +161,7 @@ class TD3Agent(AgentBase):
                     q = torch.minimum(q1, q2)
                     actor_loss = -torch.mean(q)
                     actor_loss.backward()
+                    nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                     self.net.actor_opt.step()
                 self.soft_update()
             self.decay_noise()

@@ -129,6 +129,7 @@ class DoubleDQNAgent(DQNAgentBase):
                 self.net.train()
                 loss = self.loss(*self.buffer.sample(batch_size))
                 loss.backward()
+                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.net.opt.step()
                 self.soft_update()
             self.decay_noise()

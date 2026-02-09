@@ -143,6 +143,7 @@ class DiscreteSACAgent(AgentBase):
                 critic_loss = F.smooth_l1_loss(q1.gather(1, action.long()), td_target) + \
                     F.smooth_l1_loss(q2.gather(1, action.long()), td_target)
                 critic_loss.backward()
+                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.net.critic_opt.step()
 
                 self.net.q1.eval()
@@ -153,12 +154,13 @@ class DiscreteSACAgent(AgentBase):
                 q_pi = torch.minimum(q1, q2)
                 actor_loss = -(prob * (q_pi.detach() + self.alpha * entropy)).sum(dim=1).mean()
                 actor_loss.backward()
+                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.net.actor_opt.step()
 
                 alpha_loss = (prob.detach() * (self.net.alpha.exp() * (entropy.detach() - self.target_entropy))).mean()
                 self.net.alpha_opt.zero_grad()
                 alpha_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.net.alpha, 0.1)
+                nn.utils.clip_grad_norm_(self.net.alpha, 0.1)
                 self.net.alpha_opt.step()
                 self.soft_update()
 
