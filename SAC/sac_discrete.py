@@ -12,7 +12,7 @@ from torch.distributions import Categorical
 import gymnasium as gym
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import NetworkBase, AgentBase
+from common import NetworkBase, AgentBase, ResidualBlock
 
 
 @dataclass
@@ -30,32 +30,18 @@ class Config:
 class DiscreteSAC(NetworkBase):
     def __init__(self, actor_lr, critic_lr, obs_dim, h_dim, action_dim, dropout=0., alpha=0.2, alpha_lr=1e-2, computes_grad=True, device='cpu'):
         super().__init__()
-        self.pi = nn.Sequential(nn.Linear(obs_dim, h_dim),
-                                nn.LayerNorm(h_dim),
-                                nn.Dropout(dropout),
-                                nn.SiLU(True),
-                                nn.Linear(h_dim, h_dim),
-                                nn.LayerNorm(h_dim),
-                                nn.Dropout(dropout),
-                                nn.SiLU(True),
-                                nn.Linear(h_dim, action_dim))
-        self.q1 = nn.Sequential(nn.Linear(obs_dim, h_dim),
-                                nn.LayerNorm(h_dim),
-                                nn.Dropout(dropout),
-                                nn.SiLU(True),
-                                nn.Linear(h_dim, h_dim),
-                                nn.LayerNorm(h_dim),
-                                nn.Dropout(dropout),
-                                nn.SiLU(True),
-                                nn.Linear(h_dim, action_dim))
+        self.pi = nn.Sequential(ResidualBlock(obs_dim, h_dim, dropout),
+                                ResidualBlock(h_dim, h_dim, dropout),
+                                ResidualBlock(h_dim, action_dim))
+        self.q1 = nn.Sequential(ResidualBlock(obs_dim, h_dim, dropout),
+                                ResidualBlock(h_dim, h_dim, dropout),
+                                ResidualBlock(h_dim, action_dim))
         self.q2 = deepcopy(self.q1)
         self.alpha = nn.Parameter(torch.tensor([[math.log(alpha)]]), requires_grad=True)
         self.alpha_opt = SGD([self.alpha], lr=alpha_lr)
         self.action_dim = action_dim
         self.obs_dim = obs_dim
         self.apply(self.init_weights)
-
-        nn.init.constant_(self.pi[-1].weight, 0)
 
         self.actor_opt = NAdam(self.pi.parameters(), lr=actor_lr, weight_decay=0.01, decoupled_weight_decay=True)
         self.critic_opt = NAdam([{'params': self.q1.parameters()}, {'params': self.q2.parameters()}],
@@ -66,7 +52,7 @@ class DiscreteSAC(NetworkBase):
 
     def init_weights(self, m):
         if isinstance(m, nn.Linear):
-            nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+            nn.init.orthogonal_(m.weight)
             nn.init.constant_(m.bias, 0)
 
     def actor(self, state, deterministic=False):

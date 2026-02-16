@@ -12,6 +12,35 @@ def quantile_huber_loss(pred, target, tau, kappa=1.0):
     return loss.mean()
 
 
+class GLU(nn.Module):
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.gate = nn.Linear(in_dim, out_dim)
+        self.proj = nn.Linear(in_dim, out_dim)
+
+    def forward(self, x):
+        return torch.sigmoid(self.gate(x)) * self.proj(x)
+
+
+class ResidualBlock(nn.Module):
+    def __init__(self, in_dim, out_dim, dropout=0.):
+        super().__init__()
+        self.glu = GLU(in_dim, out_dim)
+        self.linear = nn.Linear(out_dim, out_dim)
+        self.norm = nn.RMSNorm(in_dim, 1e-5)
+        self.dropout = nn.Dropout(dropout, inplace=True)
+        self.residual = in_dim == out_dim
+
+    def forward(self, x):
+        residual = 0
+        if self.residual:
+            residual = x
+        x = self.norm(x)
+        x = self.glu(x)
+        x = self.linear(x)
+        return self.dropout(x) + residual
+
+
 class NetworkBase(nn.Module):
     @staticmethod
     def configure_optimizer(model, weight_decay, learning_rate, betas=(0.9, 0.999)):

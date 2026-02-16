@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 from torch.optim import NAdam
 from dataclasses import dataclass
+from common import ResidualBlock
 from torch.distributions import Categorical
 import gymnasium as gym
 from tqdm.auto import tqdm
@@ -28,28 +29,18 @@ class Config:
     seq_len: int = 8            # BPTT 长度
 
 
-class Block(nn.Module):
-    def __init__(self, in_dim, out_dim):
-        super().__init__()
-        self.net = nn.Sequential(nn.Linear(in_dim, out_dim),
-                                 nn.Tanh())
-
-    def forward(self, x):
-        return self.net(x)
-
-
 class RecurrentPPO(nn.Module):
     def __init__(self, lr, obs_dim, h_dim, action_dim, lstm_hidden_dim, lstm_layers, computes_grad=True, device='cpu'):
         super().__init__()
-        self.embedding = nn.Sequential(Block(obs_dim, h_dim),
-                                       Block(h_dim, h_dim))
+        self.embedding = nn.Sequential(ResidualBlock(obs_dim, h_dim),
+                                       ResidualBlock(h_dim, h_dim))
 
         self.lstm = nn.LSTM(h_dim, lstm_hidden_dim, num_layers=lstm_layers, batch_first=True)
 
-        self.actor_head = nn.Sequential(Block(lstm_hidden_dim, h_dim),
-                                        nn.Linear(h_dim, action_dim))
-        self.critic_head = nn.Sequential(Block(lstm_hidden_dim, h_dim),
-                                         nn.Linear(h_dim, 1))
+        self.actor_head = nn.Sequential(ResidualBlock(lstm_hidden_dim, h_dim),
+                                        ResidualBlock(h_dim, action_dim))
+        self.critic_head = nn.Sequential(ResidualBlock(lstm_hidden_dim, h_dim),
+                                         ResidualBlock(h_dim, 1))
 
         self.opt = NAdam(self.parameters(), lr, eps=1e-5)
 

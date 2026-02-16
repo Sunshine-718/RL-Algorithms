@@ -26,7 +26,7 @@ class Config:
     gaeLambda: float = 0.95
     ent_coef: float = 0.0
     vf_coef: float = 0.5
-    gp: float = 1
+    gp: float = 0
 
 
 class ContinuousPPO(NNBase):
@@ -42,7 +42,7 @@ class ContinuousPPO(NNBase):
                                    ResidualBlock(h_dim, h_dim),
                                    ResidualBlock(h_dim, num_quantiles))
         # self.value = nn.Linear(obs_dim, 1)
-        self.opt = AdamW(self.parameters(), lr, weight_decay=0.0, eps=1e-5)
+        self.opt = AdamW(self.parameters(), lr, eps=1e-5)
         self.obs_dim = obs_dim
         self.action_dim = action_dim
         self.action_limit = action_limit
@@ -88,7 +88,7 @@ class ContinuousPPO(NNBase):
         alpha, beta = self.actor(state)
         dist = Beta(alpha, beta)
         if action is not None:
-            return dist, dist.log_prob(action)
+            return dist, dist.log_prob(action).sum(dim=-1, keepdim=True)
         return dist, None
 
     def transform(self, action):
@@ -158,8 +158,9 @@ class PPOAgent(PPOAgentBase):
         with torch.no_grad():
             values = self.net.critic(states)
             next_values = self.net.critic(next_states)
-            advantages = self.GAE(self.discount, self.gaeLambda, rewards.reshape(-1), values, next_values, (terminated + truncated).bool().int())
-            td_target = advantages + values
+            advantages = self.GAE(self.discount, self.gaeLambda, rewards.reshape(-1), values.mean(dim=-1),
+                                  next_values.mean(dim=-1), terminated).reshape(-1, 1)
+            td_target = advantages.expand(-1, self.num_quantiles) + values
             _, log_probs = self.net.get_dist_logp(states, actions)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         dataset = TensorDataset(states, actions, log_probs, advantages, td_target)
@@ -200,7 +201,7 @@ if __name__ == "__main__":
     env = gym.make("InvertedPendulum-v5", render_mode='human' if not update else None)
     env = RescaleAction(env, -1, 1)
     env = RecordEpisodeStatistics(env)
-    env = NormalizeObservation(env)
+    # env = NormalizeObservation(env)
     env = NormalizeReward(env)
     ac = ContinuousPPO(1e-4, env.observation_space.shape[0], 128, env.action_space.shape[0], 1, 51, True, device=device)
     config = Config()
@@ -216,7 +217,6 @@ if __name__ == "__main__":
     res = 0
     iterator = tqdm(range(10000))
     plt.ion()
-
     # scaler = RewardScaler()
     for i in iterator:
         state = env.reset()[0]

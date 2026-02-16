@@ -1,7 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.optim import NAdam, SGD
 
 
 def quantile_huber_loss(pred, target, tau, kappa=1.0):
@@ -38,7 +36,7 @@ class ResidualBlock(nn.Module):
         x = self.norm(x)
         x = self.glu(x)
         x = self.linear(x)
-        return self.dropout(x + residual)
+        return self.dropout(x) + residual
 
 
 class NetworkBase(nn.Module):

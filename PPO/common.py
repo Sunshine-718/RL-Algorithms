@@ -38,7 +38,7 @@ class ResidualBlock(nn.Module):
         x = self.norm(x)
         x = self.glu(x)
         x = self.linear(x)
-        return self.dropout(x + residual)
+        return self.dropout(x) + residual
 
 
 class NNBase(nn.Module):
@@ -81,11 +81,7 @@ class PPOAgentBase:
         adv = torch.zeros_like(values)
         advantage = 0
         for t in reversed(range(len(rewards))):
-            if t == len(rewards) - 1:
-                next_value = next_values[t]
-            else:
-                next_value = values[t + 1]
-            delta = rewards[t] + discount * next_value * (1 - dones[t]) - values[t]
+            delta = rewards[t] + discount * next_values[t] * (1 - dones[t]) - values[t]
             adv[t] = advantage = delta + discount * gaeLambda * (1 - dones[t]) * advantage
         return adv
 
@@ -151,6 +147,6 @@ class ReplayBuffer:
 
     def retrive_all(self):
         length = len(self)
-        assert self.counter <= length
+        assert self.counter <= self.capacity
         return self.state[:length], self.action[:length, :], self.reward[:length, :], \
             self.next_state[:length, :], self.terminated[:length, :].int(), self.truncated[:length, :].int()

@@ -165,14 +165,14 @@ class ContinuousSACAgent(AgentBase):
 if __name__ == "__main__":
     update = 0
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    env = gym.make("BipedalWalker-v3", hardcore=True, render_mode='human' if not update else None)
+    env = gym.make("BipedalWalker-v3", hardcore=False, render_mode='human' if not update else None)
     env = RescaleAction(env, -1, 1)
     ac = ContinuousSAC(1e-3, 3e-3, env.observation_space.shape[0],
                        256, env.action_space.shape[0], 1, 0, 51, 0.2, 1e-2, device=device)
     config = Config()
     agent = ContinuousSACAgent('test', ac, config)
     agent.load()
-    agent.n_step = 5
+    agent.n_step = 10
     reward_container = []
     Loss = []
     td_error = []

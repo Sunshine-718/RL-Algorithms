@@ -11,7 +11,7 @@ from copy import deepcopy
 import gymnasium as gym
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import GLUBlock, NNBase, DQNAgentBase, quantile_huber_loss, QuantileEmbedding
+from common import ResidualBlock, NNBase, DQNAgentBase, quantile_huber_loss, QuantileEmbedding
 
 
 @dataclass
@@ -29,20 +29,17 @@ class Config:
 class DueilingIQN(NNBase):
     def __init__(self, lr, obs_dim, h_dim, num_actions, dropout=0., computes_grad=True, device='cpu'):
         super().__init__()
-        self.in_block = GLUBlock(obs_dim, h_dim, dropout)
-        self.block1 = GLUBlock(h_dim, h_dim, dropout)
-        self.a_block1 = GLUBlock(h_dim, h_dim, dropout)
-        self.v_block1 = GLUBlock(h_dim, h_dim, dropout)
-        self.a_out = nn.Linear(h_dim, num_actions)
-        self.v_out = nn.Linear(h_dim, 1)
+        self.hidden = nn.Sequential(ResidualBlock(obs_dim, h_dim, dropout),
+                                    ResidualBlock(h_dim, h_dim, dropout))
+        self.v = nn.Sequential(ResidualBlock(h_dim, h_dim, dropout),
+                               ResidualBlock(h_dim, 1))
+        self.a = nn.Sequential(ResidualBlock(h_dim, h_dim, dropout),
+                               ResidualBlock(h_dim, num_actions))
         self.quantile_layer = QuantileEmbedding(h_dim, h_dim)
         self.norm = nn.LayerNorm(h_dim)
         self.action_dim = num_actions
         self.obs_dim = obs_dim
         self.apply(self.init_weights)
-
-        # nn.init.constant_(self.v[-1].weight, 0)
-        nn.init.constant_(self.a_out.weight, 0)
 
         self.opt = self.configure_optimizer(0.01, lr)
         self.computes_grad(computes_grad)
@@ -51,22 +48,18 @@ class DueilingIQN(NNBase):
 
     def init_weights(self, m):
         if isinstance(m, nn.Linear):
-            nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+            nn.init.orthogonal_(m.weight)
             # if hasattr(m, 'bias'):
             #     nn.init.constant_(m.bias, 0)
 
     def forward(self, state, tau):
-        batch_size = state.shape[0]
-        hidden = F.silu(self.in_block(state))
-        hidden = F.silu(self.block1(hidden) + hidden)
+        hidden = self.hidden(state)
 
         quantile_embedding = self.quantile_layer(tau)
         hidden = F.silu(self.norm(hidden.unsqueeze(1).expand(state.shape[0], tau.shape[1], -1) * quantile_embedding))
 
-        v_hidden = F.silu(self.v_block1(hidden) + hidden)
-        v = self.v_out(v_hidden).permute(0, 2, 1)
-        a_hidden = F.silu(self.a_block1(hidden) + hidden)
-        a = self.a_out(a_hidden).permute(0, 2, 1)
+        v = self.v(hidden).permute(0, 2, 1)
+        a = self.a(hidden).permute(0, 2, 1)
         q = v + (a - torch.mean(a, 1, keepdim=True))
         return q
 

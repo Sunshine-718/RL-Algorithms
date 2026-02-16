@@ -26,7 +26,7 @@ class Config:
     gaeLambda: float = 0.95
     ent_coef: float = 0.0
     vf_coef: float = 0.5
-    gp: float = 1
+    gp: float = 0
 
 
 class ContinuousPPO(NNBase):
@@ -87,7 +87,7 @@ class ContinuousPPO(NNBase):
         alpha, beta = self.actor(state)
         dist = Beta(alpha, beta)
         if action is not None:
-            return dist, dist.log_prob(action)
+            return dist, dist.log_prob(action).sum(dim=-1, keepdim=True)
         return dist, None
 
     def transform(self, action):
@@ -155,7 +155,7 @@ class PPOAgent(PPOAgentBase):
             values = self.net.critic(states).reshape(-1)
             next_values = self.net.critic(next_states).reshape(-1)
             advantages = self.GAE(self.discount, self.gaeLambda, rewards.reshape(-1), values,
-                                  next_values, (terminated + truncated).bool().int()).reshape(-1, 1)
+                                  next_values, terminated).reshape(-1, 1)
             td_target = advantages + values.reshape(-1, 1)
             _, log_probs = self.net.get_dist_logp(states, actions)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)

@@ -10,7 +10,7 @@ from copy import deepcopy
 import gymnasium as gym
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import GLUBlock, NNBase, DQNAgentBase
+from common import ResidualBlock, NNBase, DQNAgentBase
 import flappy_bird_gymnasium
 
 
@@ -31,22 +31,17 @@ class Config:
 class DuelingDQN(NNBase):
     def __init__(self, lr, obs_dim, h_dim, num_actions, dropout=0., computes_grad=True, device='cpu'):
         super().__init__()
-        self.in_block = GLUBlock(obs_dim, h_dim, dropout)
-        self.block1 = GLUBlock(h_dim, h_dim, dropout)
+        self.hidden = nn.Sequential(ResidualBlock(obs_dim, h_dim, dropout),
+                                    ResidualBlock(h_dim, h_dim, dropout))
         self.action_embed = nn.Embedding(num_actions, h_dim)
-        self.next_latent = nn.Sequential(GLUBlock(h_dim * 2, h_dim * 2, dropout),
-                                     nn.SiLU(True),
-                                     nn.Linear(h_dim * 2, h_dim))
-        self.a_block1 = GLUBlock(h_dim, h_dim, dropout)
-        self.v_block1 = GLUBlock(h_dim, h_dim, dropout)
-        self.a_out = nn.Linear(h_dim, num_actions)
-        self.v_out = nn.Linear(h_dim, 1)
+        self.next_latent = nn.Sequential(ResidualBlock(h_dim * 2, h_dim, dropout))
+        self.v = nn.Sequential(ResidualBlock(h_dim, h_dim, dropout),
+                               ResidualBlock(h_dim, 1))
+        self.a = nn.Sequential(ResidualBlock(h_dim, h_dim, dropout),
+                               ResidualBlock(h_dim, num_actions))
         self.action_dim = num_actions
         self.obs_dim = obs_dim
         self.apply(self.init_weights)
-
-        # nn.init.constant_(self.v[-1].weight, 0)
-        nn.init.constant_(self.a_out.weight, 0)
 
         self.opt = self.configure_optimizer(0.01, lr)
         self.computes_grad(computes_grad)
@@ -55,20 +50,18 @@ class DuelingDQN(NNBase):
 
     def init_weights(self, m):
         if isinstance(m, nn.Linear):
-            nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+            nn.init.orthogonal_(m.weight)
             # if hasattr(m, 'bias'):
             #     nn.init.constant_(m.bias, 0)
 
     def forward(self, state, action=None):
-        hidden = F.silu(self.in_block(state))
-        hidden = F.silu(self.block1(hidden) + hidden)
+        hidden = self.hidden(state)
         if action is not None:
             action_embed = self.action_embed(action.view(-1).long())
             next_latent = self.next_latent(torch.cat([hidden, action_embed], dim=-1))
-        v_hidden = F.silu(self.v_block1(hidden) + hidden)
-        v = self.v_out(v_hidden)
-        a_hidden = F.silu(self.a_block1(hidden) + hidden)
-        a = self.a_out(a_hidden)
+        
+        v = self.v(hidden)
+        a = self.a(hidden)
         q = v + (a - torch.mean(a, 1, keepdim=True))
         return (q, next_latent) if action is not None else (q, hidden)
 

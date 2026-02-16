@@ -56,7 +56,7 @@ class ResidualBlock(nn.Module):
         x = self.norm(x)
         x = self.glu(x)
         x = self.linear(x)
-        return self.dropout(x + residual)
+        return self.dropout(x) + residual
 
 
 class NNBase(nn.Module):

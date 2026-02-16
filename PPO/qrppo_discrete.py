@@ -38,7 +38,7 @@ class DiscreteQRPPO(NNBase):
         self.value = nn.Sequential(ResidualBlock(obs_dim, h_dim),
                                    ResidualBlock(h_dim, h_dim),
                                    ResidualBlock(h_dim, num_quantiles))
-        self.opt = NAdam(self.parameters(), lr, weight_decay=0.01, decoupled_weight_decay=True)
+        self.opt = NAdam(self.parameters(), lr, decoupled_weight_decay=True)
         self.obs_dim = obs_dim
         self.action_dim = action_dim
         self.num_quantiles = num_quantiles
@@ -131,8 +131,8 @@ class QRPPOAgent(PPOAgentBase):
             values = self.net.critic(states)
             next_values = self.net.critic(next_states)
             advantages = self.GAE(self.discount, self.gaeLambda, rewards.reshape(-1),
-                                  values, next_values, terminated)
-            td_target = advantages + values
+                                  values.mean(dim=-1), next_values.mean(dim=-1), terminated).reshape(-1, 1)
+            td_target = advantages.expand(-1, self.num_quantiles) + values
             _, old_log_probs = self.net.get_dist(states, actions)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         dataset = TensorDataset(states, actions, old_log_probs, advantages, td_target)

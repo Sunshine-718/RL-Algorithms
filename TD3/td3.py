@@ -11,7 +11,7 @@ import gymnasium as gym
 from gymnasium.wrappers import RescaleAction
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import NetworkBase, AgentBase
+from common import NetworkBase, AgentBase, ResidualBlock
 
 
 @dataclass
@@ -33,32 +33,18 @@ class Config:
 class TD3(NetworkBase):
     def __init__(self, lr, obs_dim, h_dim, action_dim, action_limit=1., dropout=0., computes_grad=True, device='cpu'):
         super().__init__()
-        self.pi = nn.Sequential(nn.Linear(obs_dim, h_dim),
-                                nn.LayerNorm(h_dim),
-                                nn.Dropout(dropout),
-                                nn.SiLU(True),
-                                nn.Linear(h_dim, h_dim),
-                                nn.LayerNorm(h_dim),
-                                nn.Dropout(dropout),
-                                nn.SiLU(True),
-                                nn.Linear(h_dim, action_dim),
+        self.pi = nn.Sequential(ResidualBlock(obs_dim, h_dim, dropout),
+                                ResidualBlock(h_dim, h_dim, dropout),
+                                ResidualBlock(h_dim, action_dim),
                                 nn.Tanh())
-        self.q1 = nn.Sequential(nn.Linear(obs_dim + action_dim, h_dim),
-                                nn.LayerNorm(h_dim),
-                                nn.Dropout(dropout),
-                                nn.SiLU(True),
-                                nn.Linear(h_dim, h_dim),
-                                nn.LayerNorm(h_dim),
-                                nn.Dropout(dropout),
-                                nn.SiLU(True),
-                                nn.Linear(h_dim, 1))
+        self.q1 = nn.Sequential(ResidualBlock(obs_dim + action_dim, h_dim, dropout),
+                                ResidualBlock(h_dim, h_dim, dropout),
+                                ResidualBlock(h_dim, 1))
         self.q2 = deepcopy(self.q1)
         self.action_dim = action_dim
         self.obs_dim = obs_dim
         self.action_limit = action_limit
         self.apply(self.init_weights)
-
-        nn.init.constant_(self.pi[-2].weight, 0)
 
         self.actor_opt = self.configure_optimizer(self.pi, 0.01, lr)
         self.critic_opt = NAdam([{'params': self.q1.parameters()}, {'params': self.q2.parameters()}],
@@ -69,7 +55,7 @@ class TD3(NetworkBase):
 
     def init_weights(self, m):
         if isinstance(m, nn.Linear):
-            nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+            nn.init.orthogonal_(m.weight)
             nn.init.constant_(m.bias, 0)
 
     def actor(self, state):

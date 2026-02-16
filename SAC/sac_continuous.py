@@ -13,7 +13,7 @@ import gymnasium as gym
 from gymnasium.wrappers import RescaleAction
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import NetworkBase, AgentBase
+from common import NetworkBase, AgentBase, ResidualBlock
 
 
 @dataclass
@@ -31,28 +31,14 @@ class Config:
 class ContinuousSAC(NetworkBase):
     def __init__(self, actor_lr, critic_lr, obs_dim, h_dim, action_dim, action_limit=1., dropout=0., alpha=0.2, alpha_lr=1e-2, computes_grad=True, device='cpu'):
         super().__init__()
-        self.hidden = nn.Sequential(nn.Linear(obs_dim, h_dim),
-                                    nn.LayerNorm(h_dim),
-                                    nn.Dropout(dropout),
-                                    nn.SiLU(True),
-                                    nn.Linear(h_dim, h_dim),
-                                    nn.LayerNorm(h_dim),
-                                    nn.Dropout(dropout),
-                                    nn.SiLU(True))
-        self.b_alpha = nn.Sequential(nn.Linear(h_dim, h_dim),
-                                     nn.LayerNorm(h_dim),
-                                     nn.SiLU(True),
-                                     nn.Linear(h_dim, action_dim))
+        self.hidden = nn.Sequential(ResidualBlock(obs_dim, h_dim, dropout),
+                                    ResidualBlock(h_dim, h_dim, dropout))
+        self.b_alpha = nn.Sequential(ResidualBlock(h_dim, h_dim, dropout),
+                                     ResidualBlock(h_dim, action_dim))
         self.b_beta = deepcopy(self.b_alpha)
-        self.q1 = nn.Sequential(nn.Linear(obs_dim + action_dim, h_dim),
-                                nn.LayerNorm(h_dim),
-                                nn.Dropout(dropout),
-                                nn.SiLU(True),
-                                nn.Linear(h_dim, h_dim),
-                                nn.LayerNorm(h_dim),
-                                nn.Dropout(dropout),
-                                nn.SiLU(True),
-                                nn.Linear(h_dim, 1))
+        self.q1 = nn.Sequential(ResidualBlock(obs_dim + action_dim, h_dim, dropout),
+                                ResidualBlock(h_dim, h_dim, dropout),
+                                ResidualBlock(h_dim, 1))
         self.q2 = deepcopy(self.q1)
         self.alpha = nn.Parameter(torch.tensor([[math.log(alpha)]]), requires_grad=True)
         self.alpha_opt = SGD([self.alpha], lr=alpha_lr)
@@ -60,9 +46,6 @@ class ContinuousSAC(NetworkBase):
         self.obs_dim = obs_dim
         self.action_limit = action_limit
         self.apply(self.init_weights)
-
-        torch.nn.init.constant_(self.b_alpha[-1].weight, 0)
-        torch.nn.init.constant_(self.b_beta[-1].weight, 0)
 
         self.actor_opt = NAdam([{'params': self.hidden.parameters()},
                                 {'params': self.b_alpha.parameters()},
@@ -75,7 +58,7 @@ class ContinuousSAC(NetworkBase):
 
     def init_weights(self, m):
         if isinstance(m, nn.Linear):
-            nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+            nn.init.orthogonal_(m.weight)
             nn.init.constant_(m.bias, 0)
 
     def actor(self, state, deterministic=False):

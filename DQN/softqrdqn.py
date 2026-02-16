@@ -11,7 +11,7 @@ from copy import deepcopy
 import gymnasium as gym
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import GLUBlock, NNBase, DQNAgentBase, quantile_huber_loss
+from common import ResidualBlock, NNBase, DQNAgentBase, quantile_huber_loss
 import flappy_bird_gymnasium
 
 
@@ -30,19 +30,16 @@ class Config:
 class QRDuelingDQN(NNBase):
     def __init__(self, lr, obs_dim, h_dim, num_actions, num_quantiles=51, dropout=0., computes_grad=True, device='cpu'):
         super().__init__()
-        self.in_block = GLUBlock(obs_dim, h_dim, dropout)
-        self.block1 = GLUBlock(h_dim, h_dim, dropout)
-        self.a_block1 = GLUBlock(h_dim, h_dim, dropout)
-        self.v_block1 = GLUBlock(h_dim, h_dim, dropout)
-        self.a_out = nn.Linear(h_dim, num_actions * num_quantiles)
-        self.v_out = nn.Linear(h_dim, num_quantiles)
+        self.hidden = nn.Sequential(ResidualBlock(obs_dim, h_dim, dropout),
+                                    ResidualBlock(h_dim, h_dim, dropout))
+        self.v = nn.Sequential(ResidualBlock(h_dim, h_dim, dropout),
+                               ResidualBlock(h_dim, num_quantiles))
+        self.a = nn.Sequential(ResidualBlock(h_dim, h_dim, dropout),
+                               ResidualBlock(h_dim, num_actions * num_quantiles))
         self.action_dim = num_actions
         self.obs_dim = obs_dim
         self.num_quantiles = num_quantiles
         self.apply(self.init_weights)
-
-        # nn.init.constant_(self.v[-1].weight, 0)
-        nn.init.constant_(self.a_out.weight, 0)
 
         self.opt = self.configure_optimizer(0.01, lr)
         self.computes_grad(computes_grad)
@@ -51,18 +48,15 @@ class QRDuelingDQN(NNBase):
 
     def init_weights(self, m):
         if isinstance(m, nn.Linear):
-            nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+            nn.init.orthogonal_(m.weight)
             # if hasattr(m, 'bias'):
             #     nn.init.constant_(m.bias, 0)
 
     def forward(self, state):
         batch_size = state.shape[0]
-        hidden = F.silu(self.in_block(state))
-        hidden = F.silu(self.block1(hidden) + hidden)
-        v_hidden = F.silu(self.v_block1(hidden) + hidden)
-        v = self.v_out(v_hidden).view(batch_size, 1, self.num_quantiles)
-        a_hidden = F.silu(self.a_block1(hidden) + hidden)
-        a = self.a_out(a_hidden).view(batch_size, self.action_dim, self.num_quantiles)
+        hidden = self.hidden(state)
+        v = self.v(hidden).view(batch_size, 1, self.num_quantiles)
+        a = self.a(hidden).view(batch_size, self.action_dim, self.num_quantiles)
         q = v + (a - torch.mean(a, 1, keepdim=True))
         return q
 
