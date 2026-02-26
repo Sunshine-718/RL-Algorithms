@@ -130,11 +130,11 @@ class SoftQRDQNAgent(DQNAgentBase):
                 nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.net.opt.step()
                 self.alpha_opt.zero_grad()
-                probs = torch.softmax(q / self.alpha, dim=-1).cpu()
+                probs = torch.softmax(q.mean(dim=-1) / self.alpha, dim=-1).cpu()
                 dist = Categorical(probs)
                 alpha_loss = torch.exp(self._alpha).clamp_max(1.) * (dist.entropy().mean() - self.target_entropy)
                 alpha_loss.backward()
-                nn.utils.clip_grad_norm_(self.net.parameters(), 0.1)
+                nn.utils.clip_grad_norm_([self._alpha], 0.1)
                 self.alpha_opt.step()
                 self.soft_update()
             info = {'loss': loss.item()}

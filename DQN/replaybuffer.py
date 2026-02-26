@@ -83,7 +83,7 @@ class ReplayBuffer:
 
     def retrive_all(self):
         length = len(self)
-        assert self.counter <= length
+        assert self.counter >= length
         return self.state[:length], self.action[:length, :], self.reward[:length, :], self.next_state[:length], \
             self.terminated[:length, :].int(), self.truncated[:length, :].int()
 

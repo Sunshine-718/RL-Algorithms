@@ -5,7 +5,7 @@ import numpy as np
 
 
 def quantile_huber_loss(pred, target, tau, kappa=1.0):
-    # pred: [B, N], target: [B, 1], tau: [1, N]
+    # pred: [B, N], target: [B, N], tau: [1, N]
     error = pred.unsqueeze(2) - target.expand_as(pred).unsqueeze(1)  # [B, N, N]
     huber = torch.where(error.abs() <= kappa, 0.5 * error.pow(2), kappa * (error.abs() - 0.5 * kappa))
     loss = torch.abs(tau.unsqueeze(-1) - (error.detach() < 0).float()) * huber  # [B, N, N]
@@ -77,12 +77,13 @@ class PPOAgentBase:
             self.net.load(f'{self.name}_{model}.pt')
 
     @staticmethod
-    def GAE(discount, gaeLambda, rewards, values, next_values, dones):
+    def GAE(discount, gaeLambda, rewards, values, next_values, terminated, truncated):
+        done = terminated | truncated
         adv = torch.zeros_like(values)
         advantage = 0
         for t in reversed(range(len(rewards))):
-            delta = rewards[t] + discount * next_values[t] * (1 - dones[t]) - values[t]
-            adv[t] = advantage = delta + discount * gaeLambda * (1 - dones[t]) * advantage
+            delta = rewards[t] + discount * next_values[t] * (1 - terminated[t]) - values[t]
+            adv[t] = advantage = delta + discount * gaeLambda * (1 - done[t]) * advantage
         return adv
 
     @staticmethod

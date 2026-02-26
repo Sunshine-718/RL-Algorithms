@@ -5,7 +5,7 @@ from torch.optim import NAdam, SGD
 
 
 def quantile_huber_loss(pred, target, tau, kappa=1.0):
-    # pred: [B, N], target: [B, 1], tau: [1, N]
+    # pred: [B, N], target: [B, N], tau: [1, N] or [B, N]
     error = pred.unsqueeze(2) - target.expand_as(pred).unsqueeze(1)  # [B, N, N]
     huber = torch.where(error.abs() <= kappa, 0.5 * error.pow(2), kappa * (error.abs() - 0.5 * kappa))
     loss = torch.abs(tau.unsqueeze(-1) - (error.detach() < 0).float()) * huber  # [B, N, N]

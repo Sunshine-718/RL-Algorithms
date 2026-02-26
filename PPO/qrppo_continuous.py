@@ -77,7 +77,7 @@ class ContinuousPPO(NNBase):
         return self.actor(state), self.critic(state)
 
     @torch.no_grad()
-    def max_prob_action(self, state):
+    def mean_action(self, state):
         alpha, beta = self.actor(state)
         action = (alpha / (alpha + beta)).cpu()
         if action.numel() == 1:
@@ -140,11 +140,11 @@ class PPOAgent(PPOAgentBase):
         self.net.eval()
         state = torch.from_numpy(state).unsqueeze(0).float().to(self.device)
         if deterministic:
-            action = self.net.max_prob_action(state)
+            action = self.net.mean_action(state)
         else:
             action_dist, _ = self.net.get_dist_logp(state)
             action = action_dist.sample()
-            if action.size() == 1:
+            if action.numel() == 1:
                 action = action.item()
             else:
                 action = action.squeeze().cpu().numpy()
@@ -159,7 +159,7 @@ class PPOAgent(PPOAgentBase):
             values = self.net.critic(states)
             next_values = self.net.critic(next_states)
             advantages = self.GAE(self.discount, self.gaeLambda, rewards.reshape(-1), values.mean(dim=-1),
-                                  next_values.mean(dim=-1), terminated).reshape(-1, 1)
+                                  next_values.mean(dim=-1), terminated, truncated).reshape(-1, 1)
             td_target = advantages.expand(-1, self.num_quantiles) + values
             _, log_probs = self.net.get_dist_logp(states, actions)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)

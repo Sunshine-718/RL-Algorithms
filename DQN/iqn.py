@@ -27,7 +27,7 @@ class Config:
     decay: float = 0.99
 
 
-class DueilingIQN(NNBase):
+class DuelingIQN(NNBase):
     def __init__(self, lr, obs_dim, h_dim, num_actions, dropout=0., computes_grad=True, device='cpu'):
         super().__init__()
         self.hidden = nn.Sequential(ResidualBlock(obs_dim, h_dim, dropout),
@@ -103,7 +103,7 @@ class IQNAgent(DQNAgentBase):
     @torch.no_grad()
     def td_target(self, reward, next_state, terminated, n, tau):
         batch_size = next_state.shape[0]
-        next_action = self.net(next_state, tau).argmax(dim=1).reshape(next_state.shape[0], -1).unsqueeze(1)
+        next_action = self.net(next_state, tau).mean(dim=-1).argmax(dim=1).unsqueeze(1).unsqueeze(-1).expand(-1, 1, tau.shape[1])
         next_q = self.target_net(next_state, tau).gather(1, next_action).squeeze(1)
         return reward + torch.pow(self.discount, n) * next_q * (1 - terminated)
 
@@ -140,7 +140,7 @@ if __name__ == "__main__":
     env = gym.make("CartPole-v1", render_mode='human' if not update else None).unwrapped
     action_dim = env.action_space.n
     obs_dim = env.observation_space.shape[0]
-    Q = DueilingIQN(1e-3, obs_dim, 128, action_dim, 0., True, device)
+    Q = DuelingIQN(1e-3, obs_dim, 128, action_dim, 0., True, device)
     config = Config()
     agent = IQNAgent('test', Q, config)
     # agent.load()

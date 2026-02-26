@@ -4,7 +4,6 @@ import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
 import numpy as np
 from torch.optim import NAdam
-from copy import deepcopy
 from torch.distributions import Categorical
 from common import ResidualBlock, ReplayBuffer, PPOAgentBase, NNBase
 
@@ -43,10 +42,9 @@ class DiscretePPO(NNBase):
         self.action_dim = action_dim
         self.device = device
 
-        torch.nn.init.constant_(self.policy[-2].linear.weight, 0)
-
         self.computes_grad(computes_grad)
         self.apply(self.init_weights)
+        torch.nn.init.constant_(self.policy[-2].linear.weight, 0)
         self.to(device)
 
     def init_weights(self, m):
@@ -75,12 +73,16 @@ def get_actor_gradient(actor, state):
     actor_output = actor(state)
     if isinstance(actor_output, tuple):
         grads = torch.autograd.grad(inputs=state,
+                                    outputs=list(actor_output),
+                                    grad_outputs=[torch.ones_like(o) for o in actor_output],
+                                    create_graph=True,
+                                    retain_graph=True)
+    else:
+        grads = torch.autograd.grad(inputs=state,
                                     outputs=actor_output,
                                     grad_outputs=torch.ones_like(actor_output),
                                     create_graph=True,
                                     retain_graph=True)
-    else:
-        return None
     return grads[0]
 
 
@@ -95,8 +97,6 @@ def gradient_penalty(gradient, c_lambda=10):
 class PPOAgent(PPOAgentBase):
     def __init__(self, name, net, config):
         self.net: DiscretePPO = net
-        self.target_net = deepcopy(net)
-        self.target_net.computes_grad(False)
         self.buffer = ReplayBuffer(net.obs_dim, config.capacity, 1, net.device)
 
         self.device = self.net.device
@@ -115,7 +115,7 @@ class PPOAgent(PPOAgentBase):
         else:
             action_dist, _ = self.net.get_dist(state)
             action = action_dist.sample()
-            if action.size() == 1:
+            if action.numel() == 1:
                 action = action.item()
             else:
                 action = action.squeeze().cpu().numpy()
@@ -128,7 +128,7 @@ class PPOAgent(PPOAgentBase):
             values = self.net.critic(states).reshape(-1)
             next_values = self.net.critic(next_states).reshape(-1)
             advantages = self.GAE(self.discount, self.gaeLambda, rewards.reshape(-1),
-                                  values, next_values, terminated).reshape(-1, 1)
+                                  values, next_values, terminated, truncated).reshape(-1, 1)
             td_target = advantages + values.reshape(-1, 1)
             _, old_log_probs = self.net.get_dist(states, actions)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -150,7 +150,7 @@ class PPOAgent(PPOAgentBase):
                     actor_loss += gp
 
                 if self.ent_coef != 0:
-                    entropy = dist.entropy().sum(dim=-1).mean()
+                    entropy = dist.entropy().mean()
                     entropy_loss = -self.ent_coef * entropy
                 else:
                     entropy_loss = 0

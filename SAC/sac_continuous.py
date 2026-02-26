@@ -79,8 +79,8 @@ class ContinuousSAC(NetworkBase):
         return self.q1(x), self.q2(x)
 
     def forward(self, state):
-        action = self.actor(state)
-        return action, self.critic(state, action)
+        action, entropy = self.actor(state)
+        return (action, entropy), self.critic(state, action)
 
 
 class ContinuousSACAgent(AgentBase):
@@ -139,7 +139,7 @@ class ContinuousSACAgent(AgentBase):
                 critic_loss = F.smooth_l1_loss(q1, td_target) + \
                     F.smooth_l1_loss(q2, td_target)
                 critic_loss.backward()
-                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
+                nn.utils.clip_grad_norm_(list(self.net.q1.parameters()) + list(self.net.q2.parameters()), 0.5)
                 self.net.critic_opt.step()
 
                 self.net.actor_opt.zero_grad()
@@ -148,7 +148,7 @@ class ContinuousSACAgent(AgentBase):
                 q_pi = torch.minimum(q1, q2)
                 actor_loss = -(q_pi + self.alpha * entropy.view(-1, 1)).mean()
                 actor_loss.backward()
-                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
+                nn.utils.clip_grad_norm_(list(self.net.hidden.parameters()) + list(self.net.b_alpha.parameters()) + list(self.net.b_beta.parameters()), 0.5)
                 self.net.actor_opt.step()
 
                 alpha_loss = torch.exp(self.net.alpha).clamp_max(1.) * (entropy.mean().detach() - self.target_entropy)

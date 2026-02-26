@@ -62,22 +62,20 @@ class DiscreteSAC(NetworkBase):
     def actor(self, state, deterministic=False):
         logits = self.pi(state)
         probs = torch.softmax(logits, dim=-1)
-        dist = Categorical(probs)
+        log_probs = torch.log(probs + 1e-8)
         if bool(deterministic):
-            action = torch.argmax(probs, dim=-1)
+            action = torch.argmax(probs, dim=-1, keepdim=True)
         else:
-            action = dist.sample().view(-1, 1)
-        log_probs = dist.log_prob(action)
-        entropy = -log_probs.mean(dim=-1, keepdim=True)
-        return action, entropy, probs
+            action = Categorical(probs).sample().unsqueeze(-1)
+        return action, log_probs, probs
 
     def critic(self, state):
         batch_size, _ = state.shape
         return self.q1(state).reshape(batch_size, -1, self.num_quantiles), self.q2(state).reshape(batch_size, -1, self.num_quantiles)
 
     def forward(self, state):
-        action = self.actor(state)
-        return action, self.critic(state, action)
+        action, log_probs, probs = self.actor(state)
+        return (action, log_probs, probs), self.critic(state)
 
 
 class DiscreteSACAgent(AgentBase):
@@ -96,7 +94,7 @@ class DiscreteSACAgent(AgentBase):
         self._n_step = config.n_step
         self.tau = config.tau
         self.critic_update_factor = config.critic_update_factor
-        self.target_entropy = math.log(self.n_actions)
+        self.target_entropy = math.log(self.n_actions) * 0.8
         self.qr_tau = torch.linspace(0.5 / self.net.num_quantiles, 1 - 0.5 / self.net.num_quantiles,
                                      self.net.num_quantiles).to(ac.device).view(1, -1)
         self.soft_update(tau=1)
@@ -116,10 +114,10 @@ class DiscreteSACAgent(AgentBase):
 
     @torch.no_grad()
     def td_target(self, reward, next_state, terminated, n):
-        _, entropy, next_prob = self.net.actor(next_state)
+        _, next_log_probs, next_prob = self.net.actor(next_state)
         next_q1, next_q2 = self.target_net.critic(next_state)
         next_q = torch.minimum(next_q1, next_q2).mean(dim=-1)
-        next_v = (next_prob * (next_q + self.alpha * entropy)).sum(dim=1, keepdim=True)
+        next_v = (next_prob * (next_q - self.alpha * next_log_probs)).sum(dim=1, keepdim=True)
         return reward + (self.discount ** n) * next_v * (1 - terminated)
 
     def step(self, batch_size=128):
@@ -138,21 +136,21 @@ class DiscreteSACAgent(AgentBase):
                 critic_loss = quantile_huber_loss(q1.gather(1, action).squeeze(1), td_target, self.qr_tau) + \
                     quantile_huber_loss(q2.gather(1, action).squeeze(1), td_target, self.qr_tau)
                 critic_loss.backward()
-                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
+                nn.utils.clip_grad_norm_(list(self.net.q1.parameters()) + list(self.net.q2.parameters()), 0.5)
                 self.net.critic_opt.step()
 
                 self.net.q1.eval()
                 self.net.q2.eval()
                 self.net.actor_opt.zero_grad()
-                _, entropy, prob = self.net.actor(state)
+                _, log_probs, prob = self.net.actor(state)
                 q1, q2 = self.net.critic(state)
                 q_pi = torch.minimum(q1, q2)
-                actor_loss = -(prob * (q_pi.mean(dim=-1).detach() + self.alpha * entropy)).sum(dim=1).mean()
+                actor_loss = (prob * (self.alpha * log_probs - q_pi.mean(dim=-1).detach())).sum(dim=1).mean()
                 actor_loss.backward()
-                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
+                nn.utils.clip_grad_norm_(self.net.pi.parameters(), 0.5)
                 self.net.actor_opt.step()
 
-                alpha_loss = (prob.detach() * (self.net.alpha.exp() * (entropy.detach() - self.target_entropy))).mean()
+                alpha_loss = -(prob.detach() * (self.net.alpha.exp() * (log_probs.detach() + self.target_entropy))).sum(dim=1).mean()
                 self.net.alpha_opt.zero_grad()
                 alpha_loss.backward()
                 nn.utils.clip_grad_norm_(self.net.alpha, 0.1)

@@ -26,7 +26,7 @@ class Config:
     alpha: float = 0.1
 
 
-class DueilingIQN(NNBase):
+class DuelingIQN(NNBase):
     def __init__(self, lr, obs_dim, h_dim, num_actions, dropout=0., computes_grad=True, device='cpu'):
         super().__init__()
         self.hidden = nn.Sequential(ResidualBlock(obs_dim, h_dim, dropout),
@@ -109,7 +109,7 @@ class SoftIQNAgent(DQNAgentBase):
 
     @torch.no_grad()
     def td_target(self, reward, next_state, terminated, n, tau):
-        next_q1 = self.target_net(next_state, tau)
+        next_q1 = self.net(next_state, tau)
         next_q2 = self.target_net(next_state, tau)
         next_q = torch.minimum(next_q1, next_q2)
         logsumexp = self.alpha * torch.logsumexp(next_q / self.alpha, dim=1)
@@ -142,7 +142,7 @@ class SoftIQNAgent(DQNAgentBase):
                 dist = Categorical(probs)
                 alpha_loss = torch.exp(self._alpha).clamp_max(1.) * (dist.entropy().mean() - self.target_entropy)
                 alpha_loss.backward()
-                nn.utils.clip_grad_norm_(self.net.parameters(), 0.1)
+                nn.utils.clip_grad_norm_([self._alpha], 0.1)
                 self.alpha_opt.step()
                 self.soft_update()
         return loss.item() if loss is not None else None
@@ -154,7 +154,7 @@ if __name__ == "__main__":
     env = gym.make("CartPole-v1", render_mode='human' if not update else None).unwrapped
     action_dim = env.action_space.n
     obs_dim = env.observation_space.shape[0]
-    Q = DueilingIQN(1e-3, obs_dim, 128, action_dim, 0., True, device)
+    Q = DuelingIQN(1e-3, obs_dim, 128, action_dim, 0., True, device)
     config = Config()
     agent = SoftIQNAgent('test', Q, config)
     agent.load()
