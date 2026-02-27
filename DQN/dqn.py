@@ -10,7 +10,7 @@ from copy import deepcopy
 import gymnasium as gym
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import ResidualBlock, NNBase, DQNAgentBase, symlog, symexp
+from common import ResidualBlock, NNBase, DQNAgentBase
 import flappy_bird_gymnasium
 
 
@@ -97,8 +97,8 @@ class DoubleDQNAgent(DQNAgentBase):
     @torch.no_grad()
     def td_target(self, reward, next_state, terminated, n):
         next_action = self.net(next_state).argmax(dim=1).reshape(next_state.shape[0], -1)
-        next_q = symexp(self.target_net(next_state).gather(1, next_action))
-        return symlog(reward + torch.pow(self.discount, n) * next_q * (1 - terminated))
+        next_q = self.target_net(next_state).gather(1, next_action)
+        return reward + torch.pow(self.discount, n) * next_q * (1 - terminated)
 
     def loss(self, state, action, reward, next_state, terminated, truncated, n):
         # Q(St, At) <- Q(St, At) + alpha * [R_{t+1} + gamma * max_a(Q_St+1, a)} - Q(S_t, A_t)]

@@ -4,14 +4,6 @@ import torch.nn.functional as F
 from torch.optim import NAdam, SGD
 
 
-def symlog(x):
-    return torch.sign(x) * torch.log1p(torch.abs(x))
-
-
-def symexp(x):
-    return torch.sign(x) * (torch.exp(torch.abs(x)) - 1)
-
-
 def quantile_huber_loss(pred, target, tau, kappa=1.0):
     # pred: [B, N], target: [B, 1], tau: [1, N]
     error = pred.unsqueeze(2) - target.expand_as(pred).unsqueeze(1)  # [B, N, N]

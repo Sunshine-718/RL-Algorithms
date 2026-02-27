@@ -12,7 +12,7 @@ from torch.distributions import Categorical
 import gymnasium as gym
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import NetworkBase, AgentBase, quantile_huber_loss, ResidualBlock, symlog, symexp
+from common import NetworkBase, AgentBase, quantile_huber_loss, ResidualBlock
 
 
 @dataclass
@@ -116,9 +116,9 @@ class DiscreteSACAgent(AgentBase):
     def td_target(self, reward, next_state, terminated, n):
         _, next_log_probs, next_prob = self.net.actor(next_state)
         next_q1, next_q2 = self.target_net.critic(next_state)
-        next_q = symexp(torch.minimum(next_q1, next_q2)).mean(dim=-1)
+        next_q = torch.minimum(next_q1, next_q2).mean(dim=-1)
         next_v = (next_prob * (next_q - self.alpha * next_log_probs)).sum(dim=1, keepdim=True)
-        return symlog(reward + (self.discount ** n) * next_v * (1 - terminated))
+        return reward + (self.discount ** n) * next_v * (1 - terminated)
 
     def step(self, batch_size=128):
         if batch_size <= len(self.buffer):
@@ -144,7 +144,7 @@ class DiscreteSACAgent(AgentBase):
                 self.net.actor_opt.zero_grad()
                 _, log_probs, prob = self.net.actor(state)
                 q1, q2 = self.net.critic(state)
-                q_pi = symexp(torch.minimum(q1, q2))
+                q_pi = torch.minimum(q1, q2)
                 actor_loss = (prob * (self.alpha * log_probs - q_pi.mean(dim=-1).detach())).sum(dim=1).mean()
                 actor_loss.backward()
                 nn.utils.clip_grad_norm_(self.net.pi.parameters(), 0.5)

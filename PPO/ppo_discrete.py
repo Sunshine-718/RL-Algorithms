@@ -5,7 +5,7 @@ from torch.utils.data import TensorDataset, DataLoader
 import numpy as np
 from torch.optim import NAdam
 from torch.distributions import Categorical
-from common import ResidualBlock, ReplayBuffer, PPOAgentBase, NNBase, symlog, symexp
+from common import ResidualBlock, ReplayBuffer, PPOAgentBase, NNBase
 
 import gymnasium as gym
 from tqdm.auto import tqdm
@@ -125,11 +125,11 @@ class PPOAgent(PPOAgentBase):
         self.net.eval()
         states, actions, rewards, next_states, terminated, truncated = self.buffer.retrive_all()
         with torch.no_grad():
-            values = symexp(self.net.critic(states).reshape(-1))
-            next_values = symexp(self.net.critic(next_states).reshape(-1))
+            values = self.net.critic(states).reshape(-1)
+            next_values = self.net.critic(next_states).reshape(-1)
             advantages = self.GAE(self.discount, self.gaeLambda, rewards.reshape(-1),
                                   values, next_values, terminated, truncated).reshape(-1, 1)
-            td_target = symlog(advantages + values.reshape(-1, 1))
+            td_target = advantages + values.reshape(-1, 1)
             _, old_log_probs = self.net.get_dist(states, actions)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         dataset = TensorDataset(states, actions, old_log_probs, advantages, td_target)

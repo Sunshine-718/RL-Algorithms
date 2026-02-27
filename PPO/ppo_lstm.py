@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 from torch.optim import NAdam
 from dataclasses import dataclass
-from common import ResidualBlock, symlog, symexp
+from common import ResidualBlock
 from torch.distributions import Categorical
 import gymnasium as gym
 from tqdm.auto import tqdm
@@ -286,8 +286,7 @@ class PPOAgentLSTM:
 
             # --- [Fix 1] ---
             # 计算 Values: 结果 squeeze 掉 seq_len 维度 -> [2048, 1] -> [2048]
-            # symexp 还原到原始空间用于 GAE 计算
-            values = symexp(self.net.get_value(states_in, (b_h_all, b_c_all), terminated=None)).squeeze(-1)
+            values = self.net.get_value(states_in, (b_h_all, b_c_all), terminated=None).squeeze(-1)
 
             # 计算 Old Log Probs
             dist, _ = self.net.get_dist_logp(states_in, (b_h_all, b_c_all), action=None, terminated=None)
@@ -319,7 +318,7 @@ class PPOAgentLSTM:
             lastgaelam = delta + self.config.discount * self.config.gaeLambda * nextnonterminal * lastgaelam
             advantages[t] = lastgaelam
 
-        returns = symlog(advantages + values)
+        returns = advantages + values
 
         # 归一化 Advantage
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)

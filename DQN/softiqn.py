@@ -11,7 +11,7 @@ from copy import deepcopy
 import gymnasium as gym
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import ResidualBlock, NNBase, DQNAgentBase, quantile_huber_loss, QuantileEmbedding, symlog, symexp
+from common import ResidualBlock, NNBase, DQNAgentBase, quantile_huber_loss, QuantileEmbedding
 
 
 @dataclass
@@ -109,11 +109,11 @@ class SoftIQNAgent(DQNAgentBase):
 
     @torch.no_grad()
     def td_target(self, reward, next_state, terminated, n, tau):
-        next_q1 = symexp(self.net(next_state, tau))
-        next_q2 = symexp(self.target_net(next_state, tau))
+        next_q1 = self.net(next_state, tau)
+        next_q2 = self.target_net(next_state, tau)
         next_q = torch.minimum(next_q1, next_q2)
         logsumexp = self.alpha * torch.logsumexp(next_q / self.alpha, dim=1)
-        return symlog(reward + torch.pow(self.discount, n) * logsumexp * (1 - terminated))
+        return reward + torch.pow(self.discount, n) * logsumexp * (1 - terminated)
 
     def loss(self, state, action, reward, next_state, terminated, truncated, n):
         # Q(St, At) <- Q(St, At) + alpha * [R_{t+1} + gamma * max_a(Q_St+1, a)} - Q(S_t, A_t)]

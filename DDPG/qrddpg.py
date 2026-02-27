@@ -11,7 +11,7 @@ import gymnasium as gym
 from gymnasium.wrappers import RescaleAction
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import NetworkBase, AgentBase, quantile_huber_loss, ResidualBlock, symlog, symexp
+from common import NetworkBase, AgentBase, quantile_huber_loss, ResidualBlock
 
 
 @dataclass
@@ -106,8 +106,8 @@ class DDPGAgent(AgentBase):
     @torch.no_grad()
     def td_target(self, reward, next_state, terminated, n):
         next_action = self.target_net.actor(next_state)
-        next_value = symexp(self.target_net.critic(next_state, next_action))
-        return symlog(reward + torch.pow(self.discount, n) * next_value * (1 - terminated))
+        next_value = self.target_net.critic(next_state, next_action)
+        return reward + torch.pow(self.discount, n) * next_value * (1 - terminated)
 
     def step(self, batch_size=128):
         if batch_size <= len(self.buffer):
@@ -126,7 +126,7 @@ class DDPGAgent(AgentBase):
                 self.net.q.eval()
                 self.net.actor_opt.zero_grad()
                 pi = self.net.actor(state)
-                actor_loss = -symexp(self.net.critic(state, pi)).mean()
+                actor_loss = -self.net.critic(state, pi).mean()
                 actor_loss.backward()
                 self.net.actor_opt.step()
 

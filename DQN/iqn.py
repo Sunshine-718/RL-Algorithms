@@ -10,7 +10,7 @@ from copy import deepcopy
 import gymnasium as gym
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import ResidualBlock, NNBase, DQNAgentBase, quantile_huber_loss, QuantileEmbedding, symlog, symexp
+from common import ResidualBlock, NNBase, DQNAgentBase, quantile_huber_loss, QuantileEmbedding
 
 
 @dataclass
@@ -104,8 +104,8 @@ class IQNAgent(DQNAgentBase):
     def td_target(self, reward, next_state, terminated, n, tau):
         batch_size = next_state.shape[0]
         next_action = self.net(next_state, tau).mean(dim=-1).argmax(dim=1).unsqueeze(1).unsqueeze(-1).expand(-1, 1, tau.shape[1])
-        next_q = symexp(self.target_net(next_state, tau).gather(1, next_action).squeeze(1))
-        return symlog(reward + torch.pow(self.discount, n) * next_q * (1 - terminated))
+        next_q = self.target_net(next_state, tau).gather(1, next_action).squeeze(1)
+        return reward + torch.pow(self.discount, n) * next_q * (1 - terminated)
 
     def loss(self, state, action, reward, next_state, terminated, truncated, n):
         # Q(St, At) <- Q(St, At) + alpha * [R_{t+1} + gamma * max_a(Q_St+1, a)} - Q(S_t, A_t)]

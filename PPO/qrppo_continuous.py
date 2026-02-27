@@ -11,7 +11,7 @@ import gymnasium as gym
 from gymnasium.wrappers import RescaleAction, NormalizeObservation, NormalizeReward, RecordEpisodeStatistics
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import ResidualBlock, ReplayBuffer, PPOAgentBase, NNBase, quantile_huber_loss, symlog, symexp
+from common import ResidualBlock, ReplayBuffer, PPOAgentBase, NNBase, quantile_huber_loss
 from dataclasses import dataclass, asdict
 
 
@@ -156,11 +156,11 @@ class PPOAgent(PPOAgentBase):
         states, actions, rewards, next_states, terminated, truncated = self.buffer.retrive_all()
         actions = self.net.inverse_transform(actions)
         with torch.no_grad():
-            values = symexp(self.net.critic(states))
-            next_values = symexp(self.net.critic(next_states))
+            values = self.net.critic(states)
+            next_values = self.net.critic(next_states)
             advantages = self.GAE(self.discount, self.gaeLambda, rewards.reshape(-1), values.mean(dim=-1),
                                   next_values.mean(dim=-1), terminated, truncated).reshape(-1, 1)
-            td_target = symlog(advantages.expand(-1, self.num_quantiles) + values)
+            td_target = advantages.expand(-1, self.num_quantiles) + values
             _, log_probs = self.net.get_dist_logp(states, actions)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         dataset = TensorDataset(states, actions, log_probs, advantages, td_target)
