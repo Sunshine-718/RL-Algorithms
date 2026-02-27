@@ -13,7 +13,7 @@ import gymnasium as gym
 from gymnasium.wrappers import RescaleAction
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import NetworkBase, AgentBase, quantile_huber_loss, ResidualBlock
+from common import NetworkBase, AgentBase, quantile_huber_loss, ResidualBlock, symlog, symexp
 
 
 @dataclass
@@ -125,8 +125,8 @@ class ContinuousSACAgent(AgentBase):
     def td_target(self, reward, next_state, terminated, n):
         next_pi, next_entropy = self.net.actor(next_state)
         next_q1, next_q2 = self.target_net.critic(next_state, next_pi)
-        next_q = torch.minimum(next_q1, next_q2)
-        return reward + (self.discount ** n) * (next_q + self.alpha * next_entropy) * (1 - terminated)
+        next_q = symexp(torch.minimum(next_q1, next_q2))
+        return symlog(reward + (self.discount ** n) * (next_q + self.alpha * next_entropy) * (1 - terminated))
 
     def step(self, batch_size=128):
         if batch_size <= len(self.buffer):
@@ -148,7 +148,7 @@ class ContinuousSACAgent(AgentBase):
                 self.net.actor_opt.zero_grad()
                 pi, entropy = self.net.actor(state)
                 q1, q2 = self.net.critic(state, pi)
-                q_pi = torch.minimum(q1, q2)
+                q_pi = symexp(torch.minimum(q1, q2))
                 actor_loss = -(q_pi + self.alpha * entropy.view(-1, 1)).mean()
                 actor_loss.backward()
                 nn.utils.clip_grad_norm_(list(self.net.hidden.parameters()) + list(self.net.b_alpha.parameters()) + list(self.net.b_beta.parameters()), 0.5)

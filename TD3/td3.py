@@ -11,7 +11,7 @@ import gymnasium as gym
 from gymnasium.wrappers import RescaleAction
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import NetworkBase, AgentBase, ResidualBlock
+from common import NetworkBase, AgentBase, ResidualBlock, symlog, symexp
 
 
 @dataclass
@@ -128,8 +128,8 @@ class TD3Agent(AgentBase):
                         self.net.action_limit
                     )
                     next_q1, next_q2 = self.target_net.critic(next_state, target_action)
-                    next_q = torch.minimum(next_q1, next_q2)
-                    td_target = reward + torch.pow(self.discount, n) * next_q * (1 - terminated)
+                    next_q = symexp(torch.minimum(next_q1, next_q2))
+                    td_target = symlog(reward + torch.pow(self.discount, n) * next_q * (1 - terminated))
                 q1, q2 = self.net.critic(state, action)
                 self.net.critic_opt.zero_grad()
                 critic_loss = F.smooth_l1_loss(q1, td_target) + F.smooth_l1_loss(q2, td_target)
@@ -140,7 +140,7 @@ class TD3Agent(AgentBase):
                 if self.update_step % self.update_actor_interval == 0:
                     self.net.actor_opt.zero_grad()
                     q1, q2 = self.net.critic(state, self.net.actor(state))
-                    q = torch.minimum(q1, q2)
+                    q = symexp(torch.minimum(q1, q2))
                     actor_loss = -torch.mean(q)
                     actor_loss.backward()
                     nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
