@@ -9,7 +9,7 @@ def symlog(x):
 
 
 def symexp(x):
-    return torch.sign(x) * (torch.exp(torch.abs(x)) - 1)
+    return torch.sign(x) * (torch.exp(torch.clamp(torch.abs(x), max=20)) - 1)
 
 
 def quantile_huber_loss(pred, target, tau, kappa=1.0):

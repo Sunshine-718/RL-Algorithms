@@ -23,7 +23,7 @@ class Config:
     tau: float = 3e-2
     capacity: int = 100000
     epoch: int = 10
-    reward_scale: float = 5
+    reward_scale: float = 1
     n_step: int = 5
     critic_update_factor: int = 1
 
