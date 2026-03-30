@@ -61,22 +61,7 @@ class ResidualBlock(nn.Module):
 
 class NNBase(nn.Module):
     def configure_optimizer(self, weight_decay, learning_rate, betas=(0.9, 0.999)):
-        decay_params = []
-        nodecay_params = []
-
-        for name, param in self.named_parameters():
-            if not param.requires_grad:
-                continue
-            if 'norm' in name or name.endswith('.bias'):
-                nodecay_params.append(param)
-            else:
-                decay_params.append(param)
-
-        param_groups = [
-            {'params': decay_params, 'weight_decay': weight_decay},
-            {'params': nodecay_params, 'weight_decay': 0}
-        ]
-        return NAdam(param_groups, lr=learning_rate, betas=betas, decoupled_weight_decay=True)
+        return NAdam(self.parameters(), lr=learning_rate, betas=betas, weight_decay=weight_decay, decoupled_weight_decay=True)
 
     def computes_grad(self, requires_grad=True):
         for param in self.parameters():

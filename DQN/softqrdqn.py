@@ -78,7 +78,7 @@ class SoftQRDQNAgent(DQNAgentBase):
         self.tau = config.tau
         self._alpha = torch.FloatTensor([np.log(config.alpha)]).requires_grad_(True)
         self.alpha_opt = SGD([self._alpha], 0.1)
-        self.target_entropy = float(np.log(Q.action_dim)) * 0.98
+        self.target_entropy = float(np.log(Q.action_dim)) * 0.45
         self.qr_tau = torch.linspace(0.5 / Q.num_quantiles, 1 - 0.5 / Q.num_quantiles,
                                      Q.num_quantiles).to(Q.device).view(1, -1)
         self.soft_update(tau=1)
@@ -145,7 +145,7 @@ class SoftQRDQNAgent(DQNAgentBase):
 if __name__ == "__main__":
     update = 1
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    env = gym.make("LunarLander-v3", render_mode='human' if not update else None).unwrapped
+    env = gym.make("FlappyBird-v0", render_mode='human' if not update else None).unwrapped
     action_dim = env.action_space.n
     obs_dim = env.observation_space.shape[0]
     Q = QRDuelingDQN(1e-3, obs_dim, 128, action_dim, 51, 0., True, device)

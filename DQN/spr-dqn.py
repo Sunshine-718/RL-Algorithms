@@ -130,7 +130,7 @@ class DoubleDQNAgent(DQNAgentBase):
 
 
 if __name__ == "__main__":
-    update = 1
+    update = 0
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     env = gym.make("FlappyBird-v0", render_mode='human' if not update else None, use_lidar=True).unwrapped
     action_dim = env.action_space.n
@@ -138,7 +138,7 @@ if __name__ == "__main__":
     Q = DuelingDQN(1e-3, obs_dim, 128, action_dim, 0., True, device)
     config = Config()
     agent = DoubleDQNAgent('test', Q, config)
-    # agent.load()
+    agent.load()
     reward_container = []
     Loss = []
     td_error = []

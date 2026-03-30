@@ -75,7 +75,7 @@ class SoftDQNAgent(DQNAgentBase):
         self.tau = config.tau
         self._alpha = torch.FloatTensor([np.log(config.alpha)]).requires_grad_(True)
         self.alpha_opt = SGD([self._alpha], 0.1)
-        self.target_entropy = float(np.log(Q.action_dim))
+        self.target_entropy = float(np.log(Q.action_dim)) * 0.98
         self.soft_update(tau=1)
     
     @property
