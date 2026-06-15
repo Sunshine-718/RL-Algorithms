@@ -19,13 +19,13 @@ class Config:
     discount: float = 0.99
     params: str = './params'
     tau: float = 3e-2
-    capacity: int = 100000
+    capacity: int = 1000000
     epoch: int = 30
     reward_scale: float = 1.
     n_step: int = 5
-    noise: float = 0.01
+    noise: float = 0.2
     min_noise: float = 0.005
-    decay: float = 0.99
+    decay: float = 0.999
 
 
 class DuelingDQN(NNBase):
@@ -124,7 +124,7 @@ class DoubleDQNAgent(DQNAgentBase):
 
 
 if __name__ == "__main__":
-    update = 1
+    update = 0
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     env = gym.make("FlappyBird-v0", render_mode='human' if not update else None, use_lidar=True).unwrapped
     action_dim = env.action_space.n
@@ -132,7 +132,7 @@ if __name__ == "__main__":
     Q = DuelingDQN(1e-3, obs_dim, 256, action_dim, 0., True, device)
     config = Config()
     agent = DoubleDQNAgent('test', Q, config)
-    # agent.load()
+    agent.load()
     agent.n_step = 5
     reward_container = []
     Loss = []
@@ -142,7 +142,7 @@ if __name__ == "__main__":
     avg = np.zeros(interval)
     best_avg = -float('inf')
     res = 0
-    iterator = tqdm(range(10000))
+    iterator = tqdm(range(1000000))
     plt.ion()
     for i in iterator:
         state = env.reset()[0]
