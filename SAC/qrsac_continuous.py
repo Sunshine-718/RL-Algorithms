@@ -205,7 +205,7 @@ if __name__ == "__main__":
             agent.step()
         reward_container.append(episode_reward_sum)
         avg[i % interval] = episode_reward_sum
-        agent.save()
+        agent.save() if update else None
         if i % interval == 0 and i != 0:
             plt.clf()
             plt.plot(reward_container, label='Reward')

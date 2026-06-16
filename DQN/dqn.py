@@ -23,7 +23,7 @@ class Config:
     epoch: int = 30
     reward_scale: float = 1.
     n_step: int = 5
-    noise: float = 0.2
+    noise: float = 0.1
     min_noise: float = 0.005
     decay: float = 0.999
 
@@ -137,7 +137,7 @@ if __name__ == "__main__":
     reward_container = []
     Loss = []
     td_error = []
-    max_steps = 1000
+    max_steps = 1000000
     interval = 10
     avg = np.zeros(interval)
     best_avg = -float('inf')

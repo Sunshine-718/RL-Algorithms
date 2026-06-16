@@ -50,20 +50,24 @@ class NetworkBase(nn.Module):
                           "actor_opt": self.actor_opt.state_dict(),
                           "critic_opt": self.critic_opt.state_dict(),
                           "alpha_opt": self.alpha_opt.state_dict(),
-                          "alpha": self.alpha}
+                          "alpha": self.alpha.detach().clone()}
             torch.save(state_dict, path)
 
     def load(self, path=None):
         try:
             if path is not None:
                 state_dict = torch.load(path, map_location=self.device)
-                self.load_state_dict(state_dict["model"])
+                model_state = state_dict["model"]
+                if "alpha" not in model_state and "alpha" in state_dict:
+                    model_state = dict(model_state)
+                    model_state["alpha"] = state_dict["alpha"].detach()
+                self.load_state_dict(model_state)
                 self.actor_opt.load_state_dict(state_dict["actor_opt"])
                 self.critic_opt.load_state_dict(state_dict["critic_opt"])
-                self.alpha = self.alpha.load_state_dict(state_dict["alpha"])
                 self.alpha_opt.load_state_dict(state_dict["alpha_opt"])
-        except Exception as _:
+        except Exception as e:
             print('Failed to load parameters.')
+            print(e)
         finally:
             self.to(self.device)
 
