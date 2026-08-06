@@ -27,6 +27,19 @@ def load_module(relative_path):
 
 
 class ContinuousSACLogProbTests(unittest.TestCase):
+    def test_qrsac_lower_tail_quantile_mean(self):
+        module = load_module("SAC/qrsac_continuous.py")
+        q_values = torch.tensor([[3.0, 1.0, 4.0, 2.0]])
+
+        torch.testing.assert_close(
+            module.lower_tail_quantile_mean(q_values, 0.5),
+            torch.tensor([[1.5]]),
+        )
+        torch.testing.assert_close(
+            module.lower_tail_quantile_mean(q_values, 1.0),
+            torch.tensor([[2.5]]),
+        )
+
     def assert_actor_returns_transformed_log_prob(self, module):
         torch.manual_seed(0)
         net = module.ContinuousSAC(
@@ -120,6 +133,17 @@ class ContinuousSACLogProbTests(unittest.TestCase):
 
     def test_qr_continuous_sac_td_target_uses_soft_value_log_prob_term(self):
         self.assert_quantile_td_target_uses_minus_alpha_log_prob(load_module("SAC/qrsac_continuous.py"))
+
+    def test_quantile_huber_loss_uses_target_minus_prediction_sign(self):
+        module = load_module("SAC/qrsac_continuous.py")
+        tau = torch.tensor([[0.2]])
+        pred = torch.tensor([[0.0]])
+
+        positive_error = module.quantile_huber_loss(pred, torch.tensor([[1.0]]), tau)
+        negative_error = module.quantile_huber_loss(pred, torch.tensor([[-1.0]]), tau)
+
+        torch.testing.assert_close(positive_error, torch.tensor(0.1))
+        torch.testing.assert_close(negative_error, torch.tensor(0.4))
 
 
 if __name__ == "__main__":

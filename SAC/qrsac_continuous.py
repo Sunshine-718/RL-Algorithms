@@ -1,4 +1,5 @@
 import math
+from collections import deque
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -26,6 +27,47 @@ class Config:
     reward_scale: float = 5
     n_step: int = 5
     critic_update_factor: int = 1
+    actor_quantile_fraction: float = 1.0
+    symmetry_loss_coef: float = 0.0
+    actor_rl_coef: float = 1.0
+    behavior_anchor_coef: float = 0.0
+
+
+def mirror_bipedal_observation(observation):
+    """Exchange leg fields in one or more stacked frames and shift CPG by half a cycle."""
+    observation_dim = observation.shape[-1]
+    phase_dims = 2 if observation_dim % 24 == 2 else 0
+    frame_dims = observation_dim - phase_dims
+    if frame_dims < 24 or frame_dims % 24:
+        raise ValueError("BipedalWalker symmetry expects stacked 24-value frames and optional CPG phase")
+    mirrored = observation.clone() if torch.is_tensor(observation) else np.array(observation, copy=True)
+    for offset in range(0, frame_dims, 24):
+        mirrored[..., offset + 4 : offset + 9] = observation[..., offset + 9 : offset + 14]
+        mirrored[..., offset + 9 : offset + 14] = observation[..., offset + 4 : offset + 9]
+    if phase_dims:
+        mirrored[..., -2:] = -observation[..., -2:]
+    return mirrored
+
+
+def mirror_bipedal_action(action):
+    """Exchange the two leg controls without changing joint-direction signs."""
+    if action.shape[-1] != 4:
+        raise ValueError("BipedalWalker symmetry expects 4 action values")
+    mirrored = action.clone() if torch.is_tensor(action) else np.array(action, copy=True)
+    mirrored[..., 0:2] = action[..., 2:4]
+    mirrored[..., 2:4] = action[..., 0:2]
+    return mirrored
+
+
+def lower_tail_quantile_mean(q_values, fraction):
+    """Return the mean of the lowest fraction of distributional Q values."""
+    if not 0 < fraction <= 1:
+        raise ValueError("actor_quantile_fraction must be in (0, 1]")
+    if fraction == 1:
+        return q_values.mean(dim=-1, keepdim=True)
+    count = max(1, math.ceil(q_values.shape[-1] * fraction))
+    lower_tail = torch.topk(q_values, count, dim=-1, largest=False).values
+    return lower_tail.mean(dim=-1, keepdim=True)
 
 
 class ContinuousSAC(NetworkBase):
@@ -64,8 +106,16 @@ class ContinuousSAC(NetworkBase):
 
     def actor(self, state, deterministic=False):
         hidden = self.hidden(state)
-        alpha = torch.exp(self.b_alpha(hidden)) + 1
-        beta = torch.exp(self.b_beta(hidden)) + 1
+        # Keep the Beta concentrations in a numerically safe range. A single
+        # extreme update must not turn a long-running training job into NaNs.
+        alpha_logits = torch.nan_to_num(
+            self.b_alpha(hidden), nan=0.0, posinf=10.0, neginf=-10.0
+        ).clamp(-10.0, 10.0)
+        beta_logits = torch.nan_to_num(
+            self.b_beta(hidden), nan=0.0, posinf=10.0, neginf=-10.0
+        ).clamp(-10.0, 10.0)
+        alpha = torch.exp(alpha_logits) + 1
+        beta = torch.exp(beta_logits) + 1
         dist = Beta(alpha, beta)
         if bool(deterministic):
             raw_action = alpha / (alpha + beta)
@@ -102,6 +152,19 @@ class ContinuousSACAgent(AgentBase):
         self._n_step = config.n_step
         self.tau = config.tau
         self.critic_update_factor = config.critic_update_factor
+        self.actor_quantile_fraction = config.actor_quantile_fraction
+        if not 0 < self.actor_quantile_fraction <= 1:
+            raise ValueError("actor_quantile_fraction must be in (0, 1]")
+        self.symmetry_loss_coef = config.symmetry_loss_coef
+        self.actor_rl_coef = config.actor_rl_coef
+        self.behavior_anchor_coef = config.behavior_anchor_coef
+        if self.symmetry_loss_coef < 0:
+            raise ValueError("symmetry_loss_coef must be non-negative")
+        if self.actor_rl_coef < 0 or self.behavior_anchor_coef < 0:
+            raise ValueError("actor_rl_coef and behavior_anchor_coef must be non-negative")
+        observation_frame_dims = ac.obs_dim - (2 if ac.obs_dim % 24 == 2 else 0)
+        if self.symmetry_loss_coef and (observation_frame_dims % 24 or ac.action_dim != 4):
+            raise ValueError("symmetry loss is only defined for BipedalWalker")
         self.target_entropy = -self.action_dim
         self.qr_tau = torch.linspace(0.5 / self.net.num_quantiles, 1 - 0.5 / self.net.num_quantiles,
                                      self.net.num_quantiles).to(ac.device).view(1, -1)
@@ -129,7 +192,8 @@ class ContinuousSACAgent(AgentBase):
         next_q = torch.minimum(next_q1, next_q2)
         return reward + (self.discount ** n) * (next_q - self.alpha * next_log_prob) * (1 - terminated)
 
-    def step(self, batch_size=128):
+    def step(self, batch_size=128, update_actor=True):
+        metrics = None
         if batch_size <= len(self.buffer):
             for _ in range(self.epoch):
                 state, action, reward0, next_state, terminated, truncated, n = self.buffer.sample(batch_size)
@@ -142,37 +206,102 @@ class ContinuousSACAgent(AgentBase):
                 self.net.critic_opt.zero_grad()
                 critic_loss = quantile_huber_loss(q1, td_target, self.qr_tau) + \
                     quantile_huber_loss(q2, td_target, self.qr_tau)
-                critic_loss.backward()
-                nn.utils.clip_grad_norm_(list(self.net.q1.parameters()) + list(self.net.q2.parameters()), 0.5)
-                self.net.critic_opt.step()
+                critic_step_ok = bool(torch.isfinite(critic_loss))
+                if critic_step_ok:
+                    critic_loss.backward()
+                    critic_grad_norm = nn.utils.clip_grad_norm_(
+                        list(self.net.q1.parameters()) + list(self.net.q2.parameters()), 0.5
+                    )
+                    critic_step_ok = bool(torch.isfinite(critic_grad_norm))
+                    if critic_step_ok:
+                        self.net.critic_opt.step()
+                self.net.critic_opt.zero_grad()
 
-                self.net.actor_opt.zero_grad()
-                pi, log_prob = self.net.actor(state)
-                q1, q2 = self.net.critic(state, pi)
-                q_pi = torch.minimum(q1, q2)
-                actor_loss = (self.alpha * log_prob - q_pi.mean(dim=-1, keepdim=True)).mean()
-                actor_loss.backward()
-                nn.utils.clip_grad_norm_(list(self.net.hidden.parameters()) + list(self.net.b_alpha.parameters()) + list(self.net.b_beta.parameters()), 0.5)
-                self.net.actor_opt.step()
+                actor_loss = torch.zeros((), device=state.device)
+                symmetry_loss = torch.zeros((), device=state.device)
+                behavior_anchor_loss = torch.zeros((), device=state.device)
+                alpha_loss = torch.zeros((), device=state.device)
+                actor_step_ok = True
+                alpha_step_ok = True
+                if update_actor:
+                    self.net.actor_opt.zero_grad()
+                    pi, log_prob = self.net.actor(state)
+                    q1, q2 = self.net.critic(state, pi)
+                    q_pi = torch.minimum(q1, q2)
+                    actor_value = lower_tail_quantile_mean(q_pi, self.actor_quantile_fraction)
+                    sac_actor_loss = (self.alpha * log_prob - actor_value).mean()
+                    if self.symmetry_loss_coef:
+                        deterministic_pi, _ = self.net.actor(state, deterministic=True)
+                        mirrored_state = mirror_bipedal_observation(state)
+                        mirrored_pi, _ = self.net.actor(mirrored_state, deterministic=True)
+                        expected_mirrored_pi = mirror_bipedal_action(deterministic_pi).detach()
+                        symmetry_loss = F.mse_loss(mirrored_pi, expected_mirrored_pi)
+                    if self.behavior_anchor_coef:
+                        with torch.no_grad():
+                            reference_pi, _ = self.target_net.actor(state, deterministic=True)
+                        behavior_anchor_loss = F.mse_loss(deterministic_pi, reference_pi)
+                    actor_loss = (
+                        self.actor_rl_coef * sac_actor_loss
+                        + self.symmetry_loss_coef * symmetry_loss
+                        + self.behavior_anchor_coef * behavior_anchor_loss
+                    )
+                    actor_step_ok = bool(torch.isfinite(actor_loss))
+                    if actor_step_ok:
+                        actor_loss.backward()
+                        actor_grad_norm = nn.utils.clip_grad_norm_(
+                            list(self.net.hidden.parameters()) + list(self.net.b_alpha.parameters()) + list(self.net.b_beta.parameters()), 0.5
+                        )
+                        actor_step_ok = bool(torch.isfinite(actor_grad_norm))
+                        if actor_step_ok:
+                            self.net.actor_opt.step()
+                    self.net.actor_opt.zero_grad()
 
-                alpha_loss = -(self.net.alpha * (log_prob.detach() + self.target_entropy)).mean()
-                self.net.alpha_opt.zero_grad()
-                alpha_loss.backward()
-                nn.utils.clip_grad_norm_(self.net.alpha, 0.1)
-                self.net.alpha_opt.step()
+                    if self.actor_rl_coef:
+                        alpha_loss = -(self.net.alpha * (log_prob.detach() + self.target_entropy)).mean()
+                        self.net.alpha_opt.zero_grad()
+                        alpha_step_ok = bool(torch.isfinite(alpha_loss))
+                        if alpha_step_ok:
+                            alpha_loss.backward()
+                            alpha_grad_norm = nn.utils.clip_grad_norm_(self.net.alpha, 0.1)
+                            alpha_step_ok = bool(torch.isfinite(alpha_grad_norm))
+                            if alpha_step_ok:
+                                self.net.alpha_opt.step()
+                        self.net.alpha_opt.zero_grad()
                 self.soft_update()
+                metrics = {
+                    'critic_loss': float(critic_loss.detach().item()),
+                    'actor_loss': float(actor_loss.detach().item()),
+                    'symmetry_loss': float(symmetry_loss.detach().item()),
+                    'behavior_anchor_loss': float(behavior_anchor_loss.detach().item()),
+                    'alpha_loss': float(alpha_loss.detach().item()),
+                    'alpha': self.alpha,
+                    'actor_updated': bool(update_actor),
+                    'skipped_nonfinite_update': not (critic_step_ok and actor_step_ok and alpha_step_ok),
+                }
+        return metrics
 
 
 if __name__ == "__main__":
-    update = 1
+    update = 0
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    checkpoint = './params/test_last.pt'
+    payload = torch.load(checkpoint, map_location='cpu', weights_only=False)
+    model_state = payload['model']
+    obs_dim = int(model_state['hidden.0.norm.weight'].numel())
+    hidden_dim = int(model_state['hidden.0.glu.gate.weight'].shape[0])
+    num_quantiles = int(model_state['q1.2.linear.bias'].numel())
+    phase_dims = 2 if obs_dim % 24 == 2 else 0
+    frame_stack = (obs_dim - phase_dims) // 24
+    if frame_stack < 1 or frame_stack * 24 + phase_dims != obs_dim:
+        raise ValueError(f'Unsupported checkpoint observation dimension: {obs_dim}')
+
     env = gym.make("BipedalWalker-v3", hardcore=False, render_mode='human' if not update else None)
     env = RescaleAction(env, -1, 1)
-    ac = ContinuousSAC(1e-3, 3e-3, env.observation_space.shape[0],
-                       256, env.action_space.shape[0], 1, 0, 51, 0.2, 1e-2, device=device)
+    ac = ContinuousSAC(1e-3, 3e-3, obs_dim,
+                       hidden_dim, env.action_space.shape[0], 1, 0, num_quantiles, 0.2, 1e-2, device=device)
     config = Config()
     agent = ContinuousSACAgent('test', ac, config)
-    # agent.load()
+    agent.load()
     agent.n_step = 10
     reward_container = []
     Loss = []
@@ -185,13 +314,30 @@ if __name__ == "__main__":
     iterator = tqdm(range(10000))
     plt.ion()
     for i in iterator:
-        state = env.reset()[0]
+        raw_state = env.reset()[0]
+        frames = deque((raw_state.copy() for _ in range(frame_stack)), maxlen=frame_stack)
+        phase = 0.0
+
+        def augmented_state():
+            state = np.concatenate(tuple(frames)).astype(np.float32, copy=False)
+            if phase_dims:
+                angle = 2.0 * np.pi * phase
+                state = np.concatenate(
+                    [state, np.array([np.sin(angle), np.cos(angle)], dtype=np.float32)]
+                )
+            return state
+
+        state = augmented_state()
         episode_reward_sum = 0
         j = 0
         while True:
             j += 1
             action = agent.action(state, not update)
-            next_state, reward, terminated, truncated, _ = env.step(action)
+            raw_next_state, reward, terminated, truncated, _ = env.step(action)
+            frames.append(raw_next_state.copy())
+            if phase_dims:
+                phase = (phase + 1.0 / 50.0) % 1.0
+            next_state = augmented_state()
             if reward == -100:
                 reward = -10
             if bool(update):
