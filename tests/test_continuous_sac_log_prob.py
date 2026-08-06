@@ -27,6 +27,41 @@ def load_module(relative_path):
 
 
 class ContinuousSACLogProbTests(unittest.TestCase):
+    def test_qrsac_step_reports_finite_metrics(self):
+        module = load_module("SAC/qrsac_continuous.py")
+        net = module.ContinuousSAC(
+            1e-3,
+            1e-3,
+            obs_dim=8,
+            h_dim=16,
+            action_dim=4,
+            num_quantiles=5,
+            device="cpu",
+        )
+        config = module.Config(capacity=16, epoch=1, reward_scale=1.0, n_step=1)
+        agent = module.ContinuousSACAgent("metrics_test", net, config)
+        state = torch.zeros(8)
+        action = torch.zeros(4)
+        for _ in range(8):
+            agent.buffer.store(state, action, 0.0, state, False, False, 1)
+
+        metrics = agent.step(batch_size=4)
+
+        self.assertTrue(metrics["actor_updated"])
+        self.assertTrue(math.isfinite(metrics["critic_loss"]))
+        self.assertTrue(math.isfinite(metrics["actor_loss"]))
+
+    def test_quantile_huber_loss_uses_target_minus_prediction_sign(self):
+        module = load_module("SAC/qrsac_continuous.py")
+        tau = torch.tensor([[0.2]])
+        pred = torch.tensor([[0.0]])
+
+        positive_error = module.quantile_huber_loss(pred, torch.tensor([[1.0]]), tau)
+        negative_error = module.quantile_huber_loss(pred, torch.tensor([[-1.0]]), tau)
+
+        torch.testing.assert_close(positive_error, torch.tensor(0.1))
+        torch.testing.assert_close(negative_error, torch.tensor(0.4))
+
     def assert_actor_returns_transformed_log_prob(self, module):
         torch.manual_seed(0)
         net = module.ContinuousSAC(

@@ -60,6 +60,9 @@ pip install -r requirements.txt
 python DQN/dqn.py
 ```
 
+可键盘控制的 BipedalWalker 训练与操作说明见
+[`SAC/COMMAND_BIPEDAL.md`](SAC/COMMAND_BIPEDAL.md)。
+
 ## 依赖要求
 
 主要依赖：

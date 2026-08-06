@@ -26,6 +26,18 @@ class Config:
     reward_scale: float = 5
     n_step: int = 5
     critic_update_factor: int = 1
+    actor_quantile_fraction: float = 1.0
+
+
+def lower_tail_quantile_mean(q_values, fraction):
+    """Mean the lower critic quantiles for optional risk-sensitive control."""
+    if not 0 < fraction <= 1:
+        raise ValueError("actor_quantile_fraction must be in (0, 1]")
+    if fraction == 1:
+        return q_values.mean(dim=-1, keepdim=True)
+    count = max(1, math.ceil(q_values.shape[-1] * fraction))
+    lower_tail = torch.topk(q_values, count, dim=-1, largest=False).values
+    return lower_tail.mean(dim=-1, keepdim=True)
 
 
 class ContinuousSAC(NetworkBase):
@@ -64,8 +76,14 @@ class ContinuousSAC(NetworkBase):
 
     def actor(self, state, deterministic=False):
         hidden = self.hidden(state)
-        alpha = torch.exp(self.b_alpha(hidden)) + 1
-        beta = torch.exp(self.b_beta(hidden)) + 1
+        alpha_logits = torch.nan_to_num(
+            self.b_alpha(hidden), nan=0.0, posinf=10.0, neginf=-10.0
+        ).clamp(-10.0, 10.0)
+        beta_logits = torch.nan_to_num(
+            self.b_beta(hidden), nan=0.0, posinf=10.0, neginf=-10.0
+        ).clamp(-10.0, 10.0)
+        alpha = torch.exp(alpha_logits) + 1
+        beta = torch.exp(beta_logits) + 1
         dist = Beta(alpha, beta)
         if bool(deterministic):
             raw_action = alpha / (alpha + beta)
@@ -102,6 +120,9 @@ class ContinuousSACAgent(AgentBase):
         self._n_step = config.n_step
         self.tau = config.tau
         self.critic_update_factor = config.critic_update_factor
+        self.actor_quantile_fraction = config.actor_quantile_fraction
+        if not 0 < self.actor_quantile_fraction <= 1:
+            raise ValueError("actor_quantile_fraction must be in (0, 1]")
         self.target_entropy = -self.action_dim
         self.qr_tau = torch.linspace(0.5 / self.net.num_quantiles, 1 - 0.5 / self.net.num_quantiles,
                                      self.net.num_quantiles).to(ac.device).view(1, -1)
@@ -129,7 +150,8 @@ class ContinuousSACAgent(AgentBase):
         next_q = torch.minimum(next_q1, next_q2)
         return reward + (self.discount ** n) * (next_q - self.alpha * next_log_prob) * (1 - terminated)
 
-    def step(self, batch_size=128):
+    def step(self, batch_size=128, update_actor=True):
+        metrics = None
         if batch_size <= len(self.buffer):
             for _ in range(self.epoch):
                 state, action, reward0, next_state, terminated, truncated, n = self.buffer.sample(batch_size)
@@ -142,25 +164,68 @@ class ContinuousSACAgent(AgentBase):
                 self.net.critic_opt.zero_grad()
                 critic_loss = quantile_huber_loss(q1, td_target, self.qr_tau) + \
                     quantile_huber_loss(q2, td_target, self.qr_tau)
-                critic_loss.backward()
-                nn.utils.clip_grad_norm_(list(self.net.q1.parameters()) + list(self.net.q2.parameters()), 0.5)
-                self.net.critic_opt.step()
+                critic_step_ok = bool(torch.isfinite(critic_loss))
+                if critic_step_ok:
+                    critic_loss.backward()
+                    critic_grad_norm = nn.utils.clip_grad_norm_(
+                        list(self.net.q1.parameters()) + list(self.net.q2.parameters()), 0.5
+                    )
+                    critic_step_ok = bool(torch.isfinite(critic_grad_norm))
+                    if critic_step_ok:
+                        self.net.critic_opt.step()
+                self.net.critic_opt.zero_grad()
 
-                self.net.actor_opt.zero_grad()
-                pi, log_prob = self.net.actor(state)
-                q1, q2 = self.net.critic(state, pi)
-                q_pi = torch.minimum(q1, q2)
-                actor_loss = (self.alpha * log_prob - q_pi.mean(dim=-1, keepdim=True)).mean()
-                actor_loss.backward()
-                nn.utils.clip_grad_norm_(list(self.net.hidden.parameters()) + list(self.net.b_alpha.parameters()) + list(self.net.b_beta.parameters()), 0.5)
-                self.net.actor_opt.step()
+                actor_loss = torch.zeros((), device=state.device)
+                alpha_loss = torch.zeros((), device=state.device)
+                actor_step_ok = True
+                alpha_step_ok = True
+                if update_actor:
+                    self.net.actor_opt.zero_grad()
+                    pi, log_prob = self.net.actor(state)
+                    q1, q2 = self.net.critic(state, pi)
+                    q_pi = torch.minimum(q1, q2)
+                    actor_value = lower_tail_quantile_mean(
+                        q_pi, self.actor_quantile_fraction
+                    )
+                    actor_loss = (self.alpha * log_prob - actor_value).mean()
+                    actor_step_ok = bool(torch.isfinite(actor_loss))
+                    if actor_step_ok:
+                        actor_loss.backward()
+                        actor_grad_norm = nn.utils.clip_grad_norm_(
+                            list(self.net.hidden.parameters())
+                            + list(self.net.b_alpha.parameters())
+                            + list(self.net.b_beta.parameters()),
+                            0.5,
+                        )
+                        actor_step_ok = bool(torch.isfinite(actor_grad_norm))
+                        if actor_step_ok:
+                            self.net.actor_opt.step()
+                    self.net.actor_opt.zero_grad()
 
-                alpha_loss = -(self.net.alpha * (log_prob.detach() + self.target_entropy)).mean()
-                self.net.alpha_opt.zero_grad()
-                alpha_loss.backward()
-                nn.utils.clip_grad_norm_(self.net.alpha, 0.1)
-                self.net.alpha_opt.step()
+                    alpha_loss = -(
+                        self.net.alpha * (log_prob.detach() + self.target_entropy)
+                    ).mean()
+                    self.net.alpha_opt.zero_grad()
+                    alpha_step_ok = bool(torch.isfinite(alpha_loss))
+                    if alpha_step_ok:
+                        alpha_loss.backward()
+                        alpha_grad_norm = nn.utils.clip_grad_norm_(self.net.alpha, 0.1)
+                        alpha_step_ok = bool(torch.isfinite(alpha_grad_norm))
+                        if alpha_step_ok:
+                            self.net.alpha_opt.step()
+                    self.net.alpha_opt.zero_grad()
                 self.soft_update()
+                metrics = {
+                    "critic_loss": float(critic_loss.detach().item()),
+                    "actor_loss": float(actor_loss.detach().item()),
+                    "alpha_loss": float(alpha_loss.detach().item()),
+                    "alpha": self.alpha,
+                    "actor_updated": bool(update_actor),
+                    "skipped_nonfinite_update": not (
+                        critic_step_ok and actor_step_ok and alpha_step_ok
+                    ),
+                }
+        return metrics
 
 
 if __name__ == "__main__":
