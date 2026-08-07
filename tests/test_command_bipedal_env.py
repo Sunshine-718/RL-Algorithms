@@ -11,6 +11,7 @@ sys.path.insert(0, str(SAC))
 
 from command_bipedal_env import (  # noqa: E402
     CommandBipedalConfig,
+    GaitTracker,
     VelocityReference,
     compute_command_reward,
     make_command_env,
@@ -62,7 +63,7 @@ class VelocityReferenceTests(unittest.TestCase):
 
 
 class CommandRewardTests(unittest.TestCase):
-    def test_stale_support_is_penalized_and_alternating_step_is_rewarded(self):
+    def test_valid_step_is_rewarded_and_invalid_touchdown_is_penalized(self):
         config = CommandBipedalConfig()
         common = dict(
             velocity=config.command_speed,
@@ -79,26 +80,128 @@ class CommandRewardTests(unittest.TestCase):
             previous_action=np.zeros(4, dtype=np.float32),
             terminated=False,
             config=config,
-            stride_length=config.target_stride_length,
-            swing_clearance=config.target_swing_clearance,
             single_support=True,
         )
 
-        fresh_reward, _ = compute_command_reward(support_steps=0, **common)
-        stale_reward, stale = compute_command_reward(
-            support_steps=3 * config.max_support_steps,
+        neutral_reward, _ = compute_command_reward(**common)
+        valid_reward, valid = compute_command_reward(
+            valid_step=True,
+            step_displacement=config.target_stride_length,
+            swing_clearance=config.target_swing_clearance,
+            com_progress=0.5 * config.target_stride_length,
+            step_frequency=config.command_speed / config.target_stride_length,
             **common,
         )
-        alternating_reward, alternating = compute_command_reward(
-            support_steps=0,
-            alternating_step=True,
+        invalid_reward, invalid = compute_command_reward(
+            invalid_touchdown=True,
             **common,
         )
 
-        self.assertGreater(fresh_reward, stale_reward)
-        self.assertGreater(stale["support_stall"], 0.9)
-        self.assertGreater(alternating_reward, fresh_reward)
-        self.assertEqual(alternating["alternating_step"], 1.0)
+        self.assertGreater(valid_reward, neutral_reward)
+        self.assertGreater(neutral_reward, invalid_reward)
+        self.assertEqual(valid["valid_step"], 1.0)
+        self.assertEqual(invalid["invalid_touchdown"], 1.0)
+
+    def test_support_stall_starts_only_after_maximum_duration(self):
+        config = CommandBipedalConfig()
+        common = dict(
+            velocity=config.command_speed,
+            acceleration=0.0,
+            reference_velocity=config.command_speed,
+            reference_acceleration=0.0,
+            height=config.standing_height,
+            torso_angle=0.0,
+            angular_velocity=0.0,
+            vertical_velocity=0.0,
+            left_contact=True,
+            right_contact=False,
+            action=np.zeros(4, dtype=np.float32),
+            previous_action=np.zeros(4, dtype=np.float32),
+            terminated=False,
+            config=config,
+            single_support=True,
+        )
+
+        _, normal = compute_command_reward(
+            support_steps=config.max_support_steps, **common
+        )
+        _, stale = compute_command_reward(
+            support_steps=2 * config.max_support_steps, **common
+        )
+
+        self.assertEqual(normal["support_stall"], 0.0)
+        self.assertGreater(stale["support_stall"], 0.0)
+
+    def test_target_cadence_outscores_excessive_valid_cadence(self):
+        config = CommandBipedalConfig()
+        common = dict(
+            velocity=1.0,
+            acceleration=0.0,
+            reference_velocity=1.0,
+            reference_acceleration=0.0,
+            height=config.standing_height,
+            torso_angle=0.0,
+            angular_velocity=0.0,
+            vertical_velocity=0.0,
+            left_contact=True,
+            right_contact=False,
+            action=np.zeros(4, dtype=np.float32),
+            previous_action=np.zeros(4, dtype=np.float32),
+            terminated=False,
+            config=config,
+            valid_step=True,
+            single_support=True,
+            step_displacement=config.target_stride_length,
+            swing_clearance=config.target_swing_clearance,
+            com_progress=0.5 * config.target_stride_length,
+        )
+
+        target_reward, target = compute_command_reward(
+            step_frequency=1.0, **common
+        )
+        fast_reward, fast = compute_command_reward(
+            step_frequency=3.0, **common
+        )
+
+        self.assertGreater(target_reward, fast_reward)
+        self.assertGreater(target["cadence_score"], fast["cadence_score"])
+
+    def test_one_second_valid_gait_outscores_static_contact_spam(self):
+        config = CommandBipedalConfig()
+        common = dict(
+            velocity=1.0,
+            acceleration=0.0,
+            reference_velocity=1.0,
+            reference_acceleration=0.0,
+            height=config.standing_height,
+            torso_angle=0.0,
+            angular_velocity=0.0,
+            vertical_velocity=0.0,
+            left_contact=True,
+            right_contact=False,
+            action=np.zeros(4, dtype=np.float32),
+            previous_action=np.zeros(4, dtype=np.float32),
+            terminated=False,
+            config=config,
+            single_support=True,
+        )
+        neutral_reward, _ = compute_command_reward(**common)
+        invalid_reward, _ = compute_command_reward(
+            invalid_touchdown=True, **common
+        )
+        valid_reward, _ = compute_command_reward(
+            valid_step=True,
+            step_displacement=config.target_stride_length,
+            swing_clearance=config.target_swing_clearance,
+            com_progress=0.5 * config.target_stride_length,
+            step_frequency=1.0,
+            **common,
+        )
+
+        valid_gait_total = valid_reward + 49 * neutral_reward
+        contact_spam_total = 11 * invalid_reward + 39 * neutral_reward
+
+        self.assertGreater(valid_gait_total, contact_spam_total)
 
     def test_airborne_motion_is_penalized(self):
         config = CommandBipedalConfig()
@@ -149,20 +252,23 @@ class CommandRewardTests(unittest.TestCase):
             terminated=False,
             config=config,
             single_support=True,
+            valid_step=True,
+            com_progress=0.5 * config.target_stride_length,
+            step_frequency=config.command_speed / config.target_stride_length,
         )
 
         short_reward, short = compute_command_reward(
-            stride_length=0.15,
+            step_displacement=0.15,
             swing_clearance=0.02,
             **common,
         )
         full_reward, full = compute_command_reward(
-            stride_length=config.target_stride_length,
+            step_displacement=config.target_stride_length,
             swing_clearance=config.target_swing_clearance,
             **common,
         )
         overextended_reward, overextended = compute_command_reward(
-            stride_length=3.5 * config.target_stride_length,
+            step_displacement=3.5 * config.target_stride_length,
             swing_clearance=config.target_swing_clearance,
             **common,
         )
@@ -238,24 +344,135 @@ class CommandRewardTests(unittest.TestCase):
         self.assertEqual(airborne["standing_reward"], 0.0)
 
 
+class GaitTrackerTests(unittest.TestCase):
+    def setUp(self):
+        self.config = CommandBipedalConfig(
+            contact_debounce_steps=2,
+            min_swing_steps=3,
+            max_swing_steps=20,
+            min_support_steps=3,
+            min_step_interval_steps=3,
+            minimum_step_displacement=0.2,
+            minimum_com_progress=0.1,
+            minimum_swing_clearance=0.08,
+            maximum_stance_slip=0.2,
+        )
+        self.tracker = GaitTracker(self.config)
+        self.tracker.reset((True, True), (-0.5, 0.0), 0.0)
+
+    def update(
+        self,
+        contacts,
+        left_x=-0.5,
+        right_x=0.0,
+        left_clearance=0.0,
+        right_clearance=0.0,
+        com_x=0.0,
+    ):
+        return self.tracker.update(
+            raw_contacts=contacts,
+            foot_x=(left_x, right_x),
+            clearances=(left_clearance, right_clearance),
+            com_x=com_x,
+            reference_velocity=1.0,
+        )
+
+    def test_one_frame_contact_bounce_does_not_create_event(self):
+        event = self.update((False, True), left_clearance=0.02)
+        event = self.update((True, True))
+
+        self.assertFalse(event.valid_step)
+        self.assertFalse(event.invalid_touchdown)
+        self.assertEqual(self.tracker.stable_contacts, (True, True))
+
+    def test_fixed_foot_position_contact_cycle_is_not_a_step(self):
+        events = [self.update((False, True), left_clearance=0.02)]
+        events.append(self.update((False, True), left_clearance=0.10))
+        for _ in range(3):
+            events.append(self.update((False, True), left_clearance=0.15))
+        events.append(self.update((True, True)))
+        event = self.update((True, True))
+        events.append(event)
+
+        events.append(self.update((True, False), right_clearance=0.02))
+        events.append(self.update((True, False), right_clearance=0.10))
+        for _ in range(3):
+            events.append(self.update((True, False), right_clearance=0.15))
+        events.append(self.update((True, True)))
+        second_touchdown = self.update((True, True))
+        events.append(second_touchdown)
+
+        self.assertFalse(event.valid_step)
+        self.assertTrue(event.invalid_touchdown)
+        self.assertEqual(event.step_displacement, 0.0)
+        self.assertTrue(any(item.support_switch for item in events))
+        self.assertFalse(any(item.valid_step for item in events))
+        self.assertTrue(second_touchdown.invalid_touchdown)
+
+    def test_swing_with_foot_and_com_progress_is_a_valid_step(self):
+        self.update((False, True), left_clearance=0.02)
+        self.update((False, True), left_clearance=0.10)
+        self.update(
+            (False, True), left_x=-0.2, left_clearance=0.15, com_x=0.05
+        )
+        self.update((False, True), left_x=0.1, left_clearance=0.20, com_x=0.12)
+        self.update((False, True), left_x=0.4, left_clearance=0.16, com_x=0.20)
+        for _ in range(6):
+            self.update(
+                (False, True), left_x=0.4, left_clearance=0.16, com_x=0.20
+            )
+        self.update((True, True), left_x=0.5, com_x=0.25)
+        event = self.update((True, True), left_x=0.5, com_x=0.25)
+
+        self.assertTrue(event.valid_step)
+        self.assertFalse(event.invalid_touchdown)
+        self.assertGreaterEqual(event.step_displacement, 1.0)
+        self.assertGreaterEqual(event.com_progress, 0.25)
+        self.assertGreaterEqual(event.swing_clearance, 0.20)
+
+    def test_geometrically_valid_but_excessive_cadence_is_rejected(self):
+        config = CommandBipedalConfig(
+            contact_debounce_steps=1,
+            min_swing_steps=1,
+            max_swing_steps=20,
+            min_support_steps=1,
+            min_step_interval_steps=1,
+            minimum_step_displacement=0.2,
+            minimum_com_progress=0.1,
+            minimum_swing_clearance=0.08,
+            maximum_stance_slip=0.2,
+            maximum_step_frequency=4.0,
+        )
+        tracker = GaitTracker(config)
+        tracker.reset((True, True), (-0.5, 0.0), 0.0)
+        tracker.update(
+            raw_contacts=(False, True),
+            foot_x=(-0.5, 0.0),
+            clearances=(0.1, 0.0),
+            com_x=0.0,
+            reference_velocity=1.0,
+        )
+        tracker.update(
+            raw_contacts=(False, True),
+            foot_x=(0.5, 0.0),
+            clearances=(0.2, 0.0),
+            com_x=0.2,
+            reference_velocity=1.0,
+        )
+        event = tracker.update(
+            raw_contacts=(True, True),
+            foot_x=(0.5, 0.0),
+            clearances=(0.0, 0.0),
+            com_x=0.2,
+            reference_velocity=1.0,
+        )
+
+        self.assertGreater(event.step_frequency, config.maximum_step_frequency)
+        self.assertFalse(event.valid_step)
+        self.assertTrue(event.invalid_touchdown)
+
+
 class CommandBipedalEnvironmentTests(unittest.TestCase):
-    def test_support_phase_detects_alternating_feet(self):
-        env = make_command_env(19, CommandBipedalConfig(), command_mode="external")
-        try:
-            env.reset(seed=19)
-            support_leg, alternating = env.unwrapped._update_support_phase(True, False)
-            self.assertEqual(support_leg, 1)
-            self.assertFalse(alternating)
-
-            env.unwrapped._update_support_phase(True, False)
-            self.assertGreater(env.unwrapped.support_steps, 0)
-
-            support_leg, alternating = env.unwrapped._update_support_phase(False, True)
-            self.assertEqual(support_leg, -1)
-            self.assertTrue(alternating)
-            self.assertEqual(env.unwrapped.support_steps, 0)
-        finally:
-            env.close()
 
     def test_random_commands_cover_multiple_moving_speeds(self):
         config = CommandBipedalConfig(
@@ -302,7 +519,9 @@ class CommandBipedalEnvironmentTests(unittest.TestCase):
                 "acceleration_reward",
                 "standing_reward",
                 "gait_reward",
-                "stride_length",
+                "valid_step",
+                "invalid_touchdown",
+                "step_displacement",
                 "swing_clearance",
                 "height",
             ):

@@ -14,6 +14,8 @@ sys.path.insert(0, str(SAC))
 from command_bipedal_env import CommandBipedalConfig  # noqa: E402
 from replaybuffer import ReplayBuffer  # noqa: E402
 from train_command_bipedal_vector import (  # noqa: E402
+    build_env_config,
+    build_parser,
     flush_episode,
     make_vector_env,
     prepare_training_args,
@@ -33,6 +35,20 @@ class FakeAgent:
 
 
 class CommandVectorTrainerTests(unittest.TestCase):
+    def test_default_training_config_uses_gait_reward_v2_without_more_observations(self):
+        args = build_parser().parse_args([])
+        config = build_env_config(args)
+        env = make_vector_env(1, 5, config, "sync")
+        try:
+            observations, _ = env.reset(seed=5)
+
+            self.assertEqual(config.gait_reward_version, 2)
+            self.assertEqual(config.contact_debounce_steps, 2)
+            self.assertEqual(config.min_swing_steps, 8)
+            self.assertEqual(observations.shape, (1, 41))
+        finally:
+            env.close()
+
     def test_checkpoint_pruning_keeps_newest_numbered_files(self):
         with tempfile.TemporaryDirectory() as directory:
             run_dir = Path(directory)

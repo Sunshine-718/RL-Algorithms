@@ -82,9 +82,29 @@ def build_env_config(args: argparse.Namespace) -> CommandBipedalConfig:
         target_stride_length=args.target_stride_length,
         target_swing_clearance=args.target_swing_clearance,
         max_support_steps=max(1, round(args.max_support_seconds * FPS)),
+        contact_debounce_steps=max(
+            1, round(args.contact_debounce_seconds * FPS)
+        ),
+        min_swing_steps=max(1, round(args.min_swing_seconds * FPS)),
+        max_swing_steps=max(1, round(args.max_swing_seconds * FPS)),
+        min_support_steps=max(1, round(args.min_support_seconds * FPS)),
+        min_step_interval_steps=max(
+            1, round(args.min_step_interval_seconds * FPS)
+        ),
+        minimum_step_displacement=args.minimum_step_displacement,
+        minimum_com_progress=args.minimum_com_progress,
+        minimum_swing_clearance=args.minimum_swing_clearance,
+        maximum_stance_slip=args.maximum_stance_slip,
+        minimum_step_frequency=args.minimum_step_frequency,
+        maximum_step_frequency=args.maximum_step_frequency,
+        cadence_tolerance=args.cadence_tolerance,
+        step_event_scale=args.step_event_scale,
         alternating_step_reward_weight=args.alternating_step_reward_weight,
         support_stall_penalty_weight=args.support_stall_penalty_weight,
         airborne_penalty_weight=args.airborne_penalty_weight,
+        invalid_touchdown_penalty_weight=args.invalid_touchdown_penalty_weight,
+        cadence_penalty_weight=args.cadence_penalty_weight,
+        stance_slip_penalty_weight=args.stance_slip_penalty_weight,
         max_episode_steps=args.max_episode_steps,
     )
 
@@ -305,10 +325,15 @@ def evaluate(
     velocity_errors: list[float] = []
     acceleration_errors: list[float] = []
     standing_heights: list[float] = []
-    stride_lengths: list[float] = []
+    step_displacements: list[float] = []
     swing_clearances: list[float] = []
+    com_progress_values: list[float] = []
+    step_frequencies: list[float] = []
+    stance_slips: list[float] = []
     single_support: list[float] = []
-    alternating_steps: list[float] = []
+    valid_steps: list[float] = []
+    invalid_touchdowns: list[float] = []
+    support_switches: list[float] = []
     support_legs: list[float] = []
     airborne: list[float] = []
     try:
@@ -326,12 +351,21 @@ def evaluate(
                 if float(info["movement_gate"]) > 0.8:
                     support = float(info["single_support"])
                     single_support.append(support)
-                    alternating_steps.append(float(info["alternating_step"]))
+                    valid_step = float(info["valid_step"])
+                    valid_steps.append(valid_step)
+                    invalid_touchdowns.append(float(info["invalid_touchdown"]))
+                    support_switches.append(float(info["support_switch"]))
                     airborne.append(float(info["airborne"]))
                     if support > 0.5:
-                        stride_lengths.append(float(info["stride_length"]))
-                        swing_clearances.append(float(info["swing_clearance"]))
                         support_legs.append(float(info["support_leg"]))
+                    if valid_step > 0.5:
+                        step_displacements.append(
+                            float(info["step_displacement"])
+                        )
+                        swing_clearances.append(float(info["swing_clearance"]))
+                        com_progress_values.append(float(info["com_progress"]))
+                        step_frequencies.append(float(info["step_frequency"]))
+                        stance_slips.append(float(info["stance_slip"]))
                 if terminated or truncated:
                     break
             returns.append(episode_return)
@@ -345,8 +379,8 @@ def evaluate(
         "eval_standing_height": float(np.mean(standing_heights))
         if standing_heights
         else 0.0,
-        "eval_stride_length": float(np.mean(stride_lengths))
-        if stride_lengths
+        "eval_step_displacement": float(np.mean(step_displacements))
+        if step_displacements
         else 0.0,
         "eval_swing_clearance": float(np.mean(swing_clearances))
         if swing_clearances
@@ -354,8 +388,25 @@ def evaluate(
         "eval_single_support_rate": float(np.mean(single_support))
         if single_support
         else 0.0,
-        "eval_alternating_step_rate_hz": float(FPS * np.mean(alternating_steps))
-        if alternating_steps
+        "eval_com_progress": float(np.mean(com_progress_values))
+        if com_progress_values
+        else 0.0,
+        "eval_step_frequency_hz": float(np.mean(step_frequencies))
+        if step_frequencies
+        else 0.0,
+        "eval_valid_step_rate_hz": float(FPS * np.mean(valid_steps))
+        if valid_steps
+        else 0.0,
+        "eval_invalid_touchdown_rate_hz": float(
+            FPS * np.mean(invalid_touchdowns)
+        )
+        if invalid_touchdowns
+        else 0.0,
+        "eval_support_switch_rate_hz": float(FPS * np.mean(support_switches))
+        if support_switches
+        else 0.0,
+        "eval_stance_slip": float(np.mean(stance_slips))
+        if stance_slips
         else 0.0,
         "eval_support_balance_error": float(abs(np.mean(support_legs)))
         if support_legs
@@ -432,6 +483,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     episode_acceleration_sse = np.zeros(args.num_envs, dtype=np.float64)
     episode_standing_height_sum = np.zeros(args.num_envs, dtype=np.float64)
     episode_standing_height_count = np.zeros(args.num_envs, dtype=np.int64)
+    episode_movement_steps = np.zeros(args.num_envs, dtype=np.int64)
+    episode_valid_steps = np.zeros(args.num_envs, dtype=np.int64)
+    episode_invalid_touchdowns = np.zeros(args.num_envs, dtype=np.int64)
+    episode_support_switches = np.zeros(args.num_envs, dtype=np.int64)
+    episode_step_displacement_sum = np.zeros(args.num_envs, dtype=np.float64)
     needs_reset = np.zeros(args.num_envs, dtype=bool)
     recent_returns = restored_recent_returns
     last_metrics = restored_last_metrics
@@ -485,6 +541,25 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                         infos, "height", index
                     )
                     episode_standing_height_count[index] += 1
+                if _vector_info_value(infos, "movement_gate", index) > 0.8:
+                    episode_movement_steps[index] += 1
+                    valid_step = _vector_info_value(infos, "valid_step", index)
+                    episode_valid_steps[index] += int(valid_step > 0.5)
+                    episode_invalid_touchdowns[index] += int(
+                        _vector_info_value(
+                            infos, "invalid_touchdown", index
+                        )
+                        > 0.5
+                    )
+                    episode_support_switches[index] += int(
+                        _vector_info_value(infos, "support_switch", index) > 0.5
+                    )
+                    if valid_step > 0.5:
+                        episode_step_displacement_sum[index] += (
+                            _vector_info_value(
+                                infos, "step_displacement", index
+                            )
+                        )
                 valid_transitions += 1
                 if done:
                     flush_episode(agent, episode_caches[index])
@@ -514,6 +589,25 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                             episode_standing_height_sum[index]
                             / max(1, episode_standing_height_count[index])
                         ),
+                        "valid_step_rate_hz": float(
+                            FPS
+                            * episode_valid_steps[index]
+                            / max(1, episode_movement_steps[index])
+                        ),
+                        "invalid_touchdown_rate_hz": float(
+                            FPS
+                            * episode_invalid_touchdowns[index]
+                            / max(1, episode_movement_steps[index])
+                        ),
+                        "support_switch_rate_hz": float(
+                            FPS
+                            * episode_support_switches[index]
+                            / max(1, episode_movement_steps[index])
+                        ),
+                        "step_displacement": float(
+                            episode_step_displacement_sum[index]
+                            / max(1, episode_valid_steps[index])
+                        ),
                     }
                     _append_jsonl(args.run_dir / "metrics.jsonl", episode_record)
                     _append_csv(args.run_dir / "episodes.csv", episode_record)
@@ -523,6 +617,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     episode_acceleration_sse[index] = 0.0
                     episode_standing_height_sum[index] = 0.0
                     episode_standing_height_count[index] = 0
+                    episode_movement_steps[index] = 0
+                    episode_valid_steps[index] = 0
+                    episode_invalid_touchdowns[index] = 0
+                    episode_support_switches[index] = 0
+                    episode_step_displacement_sum[index] = 0.0
                     needs_reset[index] = True
 
             observations = next_observations
@@ -624,7 +723,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Train QRSAC to follow bidirectional velocity commands."
     )
-    parser.add_argument("--run-dir", type=Path, default=Path("runs/qrsac_command_bipedal"))
+    parser.add_argument(
+        "--run-dir",
+        type=Path,
+        default=Path("runs/qrsac_command_bipedal_gait_v2"),
+    )
     parser.add_argument("--total-steps", type=int, default=1_000_000)
     parser.add_argument("--num-envs", type=int, default=8)
     parser.add_argument("--vector-mode", choices=("async", "sync"), default="async")
@@ -667,13 +770,36 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--acceleration-filter", type=float, default=0.85)
     parser.add_argument("--action-penalty-weight", type=float, default=0.004)
     parser.add_argument("--action-rate-penalty-weight", type=float, default=0.008)
-    parser.add_argument("--gait-reward-weight", type=float, default=0.5)
+    parser.add_argument("--gait-reward-weight", type=float, default=0.25)
     parser.add_argument("--target-stride-length", type=float, default=1.0)
     parser.add_argument("--target-swing-clearance", type=float, default=0.28)
     parser.add_argument("--max-support-seconds", type=float, default=0.7)
-    parser.add_argument("--alternating-step-reward-weight", type=float, default=0.5)
+    parser.add_argument("--contact-debounce-seconds", type=float, default=0.04)
+    parser.add_argument("--min-swing-seconds", type=float, default=0.16)
+    parser.add_argument("--max-swing-seconds", type=float, default=0.8)
+    parser.add_argument("--min-support-seconds", type=float, default=0.12)
+    parser.add_argument("--min-step-interval-seconds", type=float, default=0.2)
+    parser.add_argument("--minimum-step-displacement", type=float, default=0.20)
+    parser.add_argument("--minimum-com-progress", type=float, default=0.10)
+    parser.add_argument("--minimum-swing-clearance", type=float, default=0.08)
+    parser.add_argument("--maximum-stance-slip", type=float, default=0.15)
+    parser.add_argument("--minimum-step-frequency", type=float, default=0.75)
+    parser.add_argument("--maximum-step-frequency", type=float, default=4.0)
+    parser.add_argument("--cadence-tolerance", type=float, default=0.75)
+    parser.add_argument("--step-event-scale", type=float, default=0.5)
+    parser.add_argument(
+        "--alternating-step-reward-weight",
+        type=float,
+        default=0.0,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--support-stall-penalty-weight", type=float, default=0.5)
     parser.add_argument("--airborne-penalty-weight", type=float, default=0.25)
+    parser.add_argument(
+        "--invalid-touchdown-penalty-weight", type=float, default=0.25
+    )
+    parser.add_argument("--cadence-penalty-weight", type=float, default=0.15)
+    parser.add_argument("--stance-slip-penalty-weight", type=float, default=0.15)
     parser.add_argument("--max-episode-steps", type=int, default=1600)
     parser.add_argument("--eval-every", type=int, default=20_000)
     parser.add_argument("--eval-episodes", type=int, default=3)

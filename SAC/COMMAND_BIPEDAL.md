@@ -10,7 +10,7 @@
 - `R`：重置环境
 - `Esc`：退出
 
-原始按键目标允许瞬间反向。环境内部使用二阶参考模型生成连续的参考速度与参考加速度，并限制最大加速度和 jerk。策略会同时看到原始目标、参考速度、参考加速度、实测加速度、相对高度、上一支撑脚和当前支撑持续时间。没有加入历史帧；两个支撑相位标量用于避免长期使用同一只脚。默认观测为 41 维：原始 24 维、向左的 10 条激光、7 个控制特征。
+原始按键目标允许瞬间反向。环境内部使用二阶参考模型生成连续的参考速度与参考加速度，并限制最大加速度和 jerk。策略会同时看到原始目标、参考速度、参考加速度、实测加速度、相对高度、当前支撑腿和当前相位持续时间。没有加入历史帧。默认观测仍为 41 维：原始 24 维、向左的 10 条激光、7 个控制特征。
 
 ## 奖励
 
@@ -21,11 +21,11 @@
 - 水平速度对参考速度的误差；
 - 实测加速度对参考加速度的误差；
 - 躯干角度、角速度、竖直速度、动作幅度和动作变化。
-- 单脚支撑阶段的左右脚间距和摆动脚离地高度，鼓励完整摆腿并减少小碎步。
+- 完整摆腿后的落脚位移、质心前进、摆动脚离地高度和合理步频。
 
-默认目标步幅为 `1.0`，目标摆动脚离地高度为 `0.28`。动作变化惩罚默认降低为 `0.008`，给完整摆腿保留足够的动作空间。步态奖励只在参考速度明显非零时启用，不影响松键后的双脚站立目标。
+默认目标步幅为 `1.0`，目标摆动脚离地高度为 `0.28`。动作变化惩罚默认为 `0.008`，给完整摆腿保留足够的动作空间。步态奖励只在参考速度明显非零且实际速度接近参考速度时启用，不影响松键后的双脚站立目标。
 
-移动时要求左右支撑脚交替。相同支撑脚持续约 `0.7` 秒后，步态奖励会衰减并逐渐施加超时惩罚；左右支撑成功切换会获得一次奖励。双脚同时腾空也会受罚，减少单脚连续跳跃或双脚跳跃取巧。
+环境会对接触信号进行去抖。左右支撑状态切换只作为诊断指标，不直接产生奖励。一次有效迈步必须满足最小支撑和摆动时间、最低摆动高度、足部沿目标方向移动、质心前进、支撑脚不过度滑动、左右有效迈步交替，以及 `0.75`～`4.0 Hz` 的步频限制。固定双脚前后位置并反复切换接触会记录为无效落地并受罚。相同支撑脚超过约 `0.7` 秒后才开始施加超时惩罚，支撑开始时没有额外奖励。双脚同时腾空也会受罚。
 
 参考加速度较大时，加速度跟踪权重自动提高；匀速阶段参考加速度逐渐回到零，速度跟踪成为主要目标。
 
@@ -45,7 +45,7 @@ python3 -m pip install -r requirements.txt
 
 ```bash
 python3 SAC/train_command_bipedal_vector.py \
-  --run-dir runs/qrsac_command_bipedal \
+  --run-dir runs/qrsac_command_bipedal_gait_v2 \
   --num-envs 8 \
   --vector-mode async
 ```
@@ -56,7 +56,7 @@ python3 SAC/train_command_bipedal_vector.py \
 
 ```bash
 python3 SAC/train_command_bipedal_vector.py \
-  --run-dir runs/qrsac_command_smoke \
+  --run-dir runs/qrsac_command_gait_v2_smoke \
   --smoke-test
 ```
 
@@ -64,25 +64,25 @@ python3 SAC/train_command_bipedal_vector.py \
 
 ```bash
 python3 SAC/train_command_bipedal_vector.py \
-  --run-dir runs/qrsac_command_bipedal \
-  --resume runs/qrsac_command_bipedal/latest.pt
+  --run-dir runs/qrsac_command_bipedal_gait_v2 \
+  --resume runs/qrsac_command_bipedal_gait_v2/latest.pt
 ```
 
-Replay buffer 不写入检查点，恢复后会重新收集样本，网络更新会等到 buffer 再次达到 batch 大小。
+Replay buffer 不写入检查点，恢复后会重新收集样本，网络更新会等到 buffer 再次达到 batch 大小。新的步态奖励标记为 `gait_reward_version=2`；旧版刷接触策略的检查点继续保留作回放和对照，不用于恢复 v2 训练。默认训练目录也已改为 `runs/qrsac_command_bipedal_gait_v2`，避免覆盖旧检查点。
 
 ## 查看与操作
 
 查看训练状态：
 
 ```bash
-python3 SAC/monitor_command_bipedal.py runs/qrsac_command_bipedal
+python3 SAC/monitor_command_bipedal.py runs/qrsac_command_bipedal_gait_v2
 ```
 
 加载模型并使用键盘：
 
 ```bash
 python3 SAC/play_command_bipedal.py \
-  runs/qrsac_command_bipedal/latest.pt
+  runs/qrsac_command_bipedal_gait_v2/latest.pt
 ```
 
 主要产物：
@@ -90,7 +90,8 @@ python3 SAC/play_command_bipedal.py \
 - `status.json`：当前步数、episode、buffer 和最近损失；
 - `episodes.csv`：每个 episode 的回报、速度 RMSE、加速度 RMSE、站立高度；
 - `evaluations.csv`：固定循环指令下的确定性评估；
-- `evaluations.csv` 还记录平均步幅、摆动脚离地高度、单脚支撑比例、交替步频、左右支撑偏置和腾空比例；
+- `episodes.csv` 还记录有效迈步、无效落地和支撑切换频率，便于识别接触刷分；
+- `evaluations.csv` 还记录落脚位移、质心前进、摆动脚离地高度、有效步频、无效落地频率、支撑切换频率、支撑脚滑动、左右支撑偏置和腾空比例；
 - `metrics.jsonl`：episode 与评估事件；
 - `latest.pt`：模型、目标网络、优化器、训练计数和环境配置。
 
