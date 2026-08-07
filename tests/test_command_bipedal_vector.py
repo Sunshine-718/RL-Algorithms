@@ -1,5 +1,6 @@
 import argparse
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from train_command_bipedal_vector import (  # noqa: E402
     flush_episode,
     make_vector_env,
     prepare_training_args,
+    prune_checkpoints,
 )
 
 
@@ -31,6 +33,21 @@ class FakeAgent:
 
 
 class CommandVectorTrainerTests(unittest.TestCase):
+    def test_checkpoint_pruning_keeps_newest_numbered_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            for step in (20_000, 40_000, 60_000, 80_000):
+                (run_dir / f"checkpoint_{step:09d}.pt").touch()
+            (run_dir / "latest.pt").touch()
+
+            prune_checkpoints(run_dir, keep=2)
+
+            self.assertEqual(
+                sorted(path.name for path in run_dir.glob("checkpoint_*.pt")),
+                ["checkpoint_000060000.pt", "checkpoint_000080000.pt"],
+            )
+            self.assertTrue((run_dir / "latest.pt").exists())
+
     def test_completed_environment_caches_do_not_mix_n_step_returns(self):
         buffer = ReplayBuffer(1, capacity=20, action_dim=1, discount=0.9, n_step=3)
         agent = FakeAgent(buffer)

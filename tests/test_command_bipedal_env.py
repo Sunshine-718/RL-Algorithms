@@ -62,6 +62,116 @@ class VelocityReferenceTests(unittest.TestCase):
 
 
 class CommandRewardTests(unittest.TestCase):
+    def test_stale_support_is_penalized_and_alternating_step_is_rewarded(self):
+        config = CommandBipedalConfig()
+        common = dict(
+            velocity=config.command_speed,
+            acceleration=0.0,
+            reference_velocity=config.command_speed,
+            reference_acceleration=0.0,
+            height=config.standing_height,
+            torso_angle=0.0,
+            angular_velocity=0.0,
+            vertical_velocity=0.0,
+            left_contact=True,
+            right_contact=False,
+            action=np.zeros(4, dtype=np.float32),
+            previous_action=np.zeros(4, dtype=np.float32),
+            terminated=False,
+            config=config,
+            stride_length=config.target_stride_length,
+            swing_clearance=config.target_swing_clearance,
+            single_support=True,
+        )
+
+        fresh_reward, _ = compute_command_reward(support_steps=0, **common)
+        stale_reward, stale = compute_command_reward(
+            support_steps=3 * config.max_support_steps,
+            **common,
+        )
+        alternating_reward, alternating = compute_command_reward(
+            support_steps=0,
+            alternating_step=True,
+            **common,
+        )
+
+        self.assertGreater(fresh_reward, stale_reward)
+        self.assertGreater(stale["support_stall"], 0.9)
+        self.assertGreater(alternating_reward, fresh_reward)
+        self.assertEqual(alternating["alternating_step"], 1.0)
+
+    def test_airborne_motion_is_penalized(self):
+        config = CommandBipedalConfig()
+        common = dict(
+            velocity=config.command_speed,
+            acceleration=0.0,
+            reference_velocity=config.command_speed,
+            reference_acceleration=0.0,
+            height=config.standing_height,
+            torso_angle=0.0,
+            angular_velocity=0.0,
+            vertical_velocity=0.0,
+            action=np.zeros(4, dtype=np.float32),
+            previous_action=np.zeros(4, dtype=np.float32),
+            terminated=False,
+            config=config,
+        )
+
+        grounded_reward, _ = compute_command_reward(
+            left_contact=True,
+            right_contact=True,
+            **common,
+        )
+        airborne_reward, airborne = compute_command_reward(
+            left_contact=False,
+            right_contact=False,
+            **common,
+        )
+
+        self.assertGreater(grounded_reward, airborne_reward)
+        self.assertEqual(airborne["airborne"], 1.0)
+
+    def test_moving_reward_prefers_stride_and_swing_clearance(self):
+        config = CommandBipedalConfig()
+        common = dict(
+            velocity=config.command_speed,
+            acceleration=0.0,
+            reference_velocity=config.command_speed,
+            reference_acceleration=0.0,
+            height=config.standing_height,
+            torso_angle=0.0,
+            angular_velocity=0.0,
+            vertical_velocity=0.0,
+            left_contact=True,
+            right_contact=False,
+            action=np.zeros(4, dtype=np.float32),
+            previous_action=np.zeros(4, dtype=np.float32),
+            terminated=False,
+            config=config,
+            single_support=True,
+        )
+
+        short_reward, short = compute_command_reward(
+            stride_length=0.15,
+            swing_clearance=0.02,
+            **common,
+        )
+        full_reward, full = compute_command_reward(
+            stride_length=config.target_stride_length,
+            swing_clearance=config.target_swing_clearance,
+            **common,
+        )
+        overextended_reward, overextended = compute_command_reward(
+            stride_length=3.5 * config.target_stride_length,
+            swing_clearance=config.target_swing_clearance,
+            **common,
+        )
+
+        self.assertGreater(full_reward, short_reward)
+        self.assertGreater(full["gait_reward"], short["gait_reward"])
+        self.assertGreater(full_reward, overextended_reward)
+        self.assertGreater(full["gait_reward"], overextended["gait_reward"])
+
     def test_zero_speed_rewards_higher_stable_stance(self):
         config = CommandBipedalConfig()
         common = dict(
@@ -129,6 +239,45 @@ class CommandRewardTests(unittest.TestCase):
 
 
 class CommandBipedalEnvironmentTests(unittest.TestCase):
+    def test_support_phase_detects_alternating_feet(self):
+        env = make_command_env(19, CommandBipedalConfig(), command_mode="external")
+        try:
+            env.reset(seed=19)
+            support_leg, alternating = env.unwrapped._update_support_phase(True, False)
+            self.assertEqual(support_leg, 1)
+            self.assertFalse(alternating)
+
+            env.unwrapped._update_support_phase(True, False)
+            self.assertGreater(env.unwrapped.support_steps, 0)
+
+            support_leg, alternating = env.unwrapped._update_support_phase(False, True)
+            self.assertEqual(support_leg, -1)
+            self.assertTrue(alternating)
+            self.assertEqual(env.unwrapped.support_steps, 0)
+        finally:
+            env.close()
+
+    def test_random_commands_cover_multiple_moving_speeds(self):
+        config = CommandBipedalConfig(
+            minimum_command_speed=1.0,
+            command_speed=3.0,
+            standing_probability=0.0,
+            max_episode_steps=50,
+        )
+        env = make_command_env(13, config, command_mode="random")
+        try:
+            env.reset(seed=13)
+            magnitudes = []
+            for _ in range(40):
+                env.unwrapped._sample_next_command()
+                magnitudes.append(abs(env.unwrapped.raw_command))
+
+            self.assertGreater(max(magnitudes) - min(magnitudes), 1.0)
+            self.assertGreaterEqual(min(magnitudes), config.minimum_command_speed)
+            self.assertLessEqual(max(magnitudes), config.command_speed)
+        finally:
+            env.close()
+
     def test_external_command_is_exposed_and_environment_steps(self):
         config = CommandBipedalConfig(max_episode_steps=50)
         env = make_command_env(7, config, command_mode="external")
@@ -137,7 +286,8 @@ class CommandBipedalEnvironmentTests(unittest.TestCase):
             self.assertEqual(observation.shape, env.observation_space.shape)
             env.unwrapped.set_command(-config.command_speed)
             observation = env.unwrapped.command_observation()
-            self.assertAlmostEqual(observation[-5], -1.0)
+            self.assertEqual(observation.shape[0], 41)
+            self.assertAlmostEqual(observation[-7], -1.0)
 
             next_observation, reward, terminated, truncated, info = env.step(
                 np.zeros(4, dtype=np.float32)
@@ -147,7 +297,15 @@ class CommandBipedalEnvironmentTests(unittest.TestCase):
             self.assertTrue(np.isfinite(reward))
             self.assertFalse(terminated)
             self.assertFalse(truncated)
-            for key in ("velocity_reward", "acceleration_reward", "standing_reward", "height"):
+            for key in (
+                "velocity_reward",
+                "acceleration_reward",
+                "standing_reward",
+                "gait_reward",
+                "stride_length",
+                "swing_clearance",
+                "height",
+            ):
                 self.assertIn(key, info)
         finally:
             env.close()

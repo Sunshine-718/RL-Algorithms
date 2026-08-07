@@ -27,10 +27,11 @@ LEFT_LIDAR_DIM = 10
 
 @dataclass
 class CommandBipedalConfig:
-    command_speed: float = 1.5
-    command_hold_min_steps: int = 50
-    command_hold_max_steps: int = 150
-    standing_probability: float = 0.35
+    command_speed: float = 3.0
+    minimum_command_speed: float = 1.0
+    command_hold_min_steps: int = 100
+    command_hold_max_steps: int = 250
+    standing_probability: float = 0.30
     settling_time: float = 1.5
     damping: float = 1.0
     acceleration_limit: float = 3.0
@@ -50,15 +51,28 @@ class CommandBipedalConfig:
     angular_velocity_penalty_weight: float = 0.015
     vertical_velocity_penalty_weight: float = 0.03
     action_penalty_weight: float = 0.004
-    action_rate_penalty_weight: float = 0.02
+    action_rate_penalty_weight: float = 0.008
+    gait_reward_weight: float = 0.5
+    target_stride_length: float = 1.0
+    target_swing_clearance: float = 0.28
+    gait_velocity_tolerance: float = 0.5
+    max_support_steps: int = 35
+    alternating_step_reward_weight: float = 0.5
+    support_stall_penalty_weight: float = 0.5
+    airborne_penalty_weight: float = 0.25
     failure_penalty: float = -10.0
     boundary_margin: float = 4.0
     include_left_lidar: bool = True
+    include_support_phase: bool = True
     max_episode_steps: int = 1600
 
     def validate(self) -> None:
         if self.command_speed <= 0:
             raise ValueError("command_speed must be positive")
+        if not 0 < self.minimum_command_speed <= self.command_speed:
+            raise ValueError(
+                "minimum_command_speed must be positive and no greater than command_speed"
+            )
         if self.command_hold_min_steps < 1:
             raise ValueError("command_hold_min_steps must be at least 1")
         if self.command_hold_max_steps < self.command_hold_min_steps:
@@ -73,6 +87,22 @@ class CommandBipedalConfig:
             raise ValueError("acceleration_filter must be in [0, 1)")
         if self.minimum_height >= self.standing_height:
             raise ValueError("standing_height must exceed minimum_height")
+        if self.gait_reward_weight < 0:
+            raise ValueError("gait_reward_weight cannot be negative")
+        if self.max_support_steps < 1:
+            raise ValueError("max_support_steps must be positive")
+        if min(
+            self.alternating_step_reward_weight,
+            self.support_stall_penalty_weight,
+            self.airborne_penalty_weight,
+        ) < 0:
+            raise ValueError("gait reward and penalty weights cannot be negative")
+        if min(
+            self.target_stride_length,
+            self.target_swing_clearance,
+            self.gait_velocity_tolerance,
+        ) <= 0:
+            raise ValueError("gait targets and tolerance must be positive")
         if self.max_episode_steps < 1:
             raise ValueError("max_episode_steps must be positive")
 
@@ -141,6 +171,11 @@ def compute_command_reward(
     previous_action: np.ndarray,
     terminated: bool,
     config: CommandBipedalConfig,
+    stride_length: float = 0.0,
+    swing_clearance: float = 0.0,
+    single_support: bool = False,
+    support_steps: int = 0,
+    alternating_step: bool = False,
 ) -> tuple[float, dict[str, float]]:
     """Compute bounded task rewards and smooth auxiliary penalties."""
     velocity_error = (velocity - reference_velocity) / config.velocity_tolerance
@@ -185,6 +220,34 @@ def compute_command_reward(
         + config.contact_reward_weight
     )
 
+    movement_gate = 1.0 - math.exp(
+        -((reference_velocity / config.gait_velocity_tolerance) ** 2)
+    )
+    stride_scale = max(0.5 * config.target_stride_length, 1e-6)
+    stride_score = math.exp(
+        -((stride_length - config.target_stride_length) / stride_scale) ** 2
+    )
+    clearance_scale = max(0.5 * config.target_swing_clearance, 1e-6)
+    clearance_score = math.exp(
+        -((swing_clearance - config.target_swing_clearance) / clearance_scale) ** 2
+    )
+    single_support_score = float(single_support)
+    support_phase_score = math.exp(
+        -((float(support_steps) / config.max_support_steps) ** 2)
+    )
+    gait_score = single_support_score * support_phase_score * (
+        0.60 * stride_score + 0.40 * clearance_score
+    )
+    alternating_step_score = float(alternating_step) * (
+        0.5 + 0.5 * stride_score
+    )
+    gait_reward = movement_gate * (
+        gait_score
+        + config.alternating_step_reward_weight * alternating_step_score
+    )
+    support_stall = movement_gate * (1.0 - support_phase_score)
+    airborne = float(not left_contact and not right_contact)
+
     action = np.asarray(action, dtype=np.float32)
     previous_action = np.asarray(previous_action, dtype=np.float32)
     auxiliary_penalty = (
@@ -194,8 +257,14 @@ def compute_command_reward(
         + config.action_penalty_weight * float(np.square(action).sum())
         + config.action_rate_penalty_weight
         * float(np.square(action - previous_action).sum())
+        + config.support_stall_penalty_weight * support_stall
+        + config.airborne_penalty_weight * movement_gate * airborne
     )
-    task_reward = tracking_reward + config.standing_reward_weight * standing_reward
+    task_reward = (
+        tracking_reward
+        + config.standing_reward_weight * standing_reward
+        + config.gait_reward_weight * gait_reward
+    )
     reward = task_reward * math.exp(-min(auxiliary_penalty, 50.0))
     if terminated:
         reward += config.failure_penalty
@@ -207,6 +276,16 @@ def compute_command_reward(
         "stand_gate": float(stand_gate),
         "height_reward": float(height_reward),
         "standing_reward": float(standing_reward),
+        "movement_gate": float(movement_gate),
+        "gait_reward": float(gait_reward),
+        "stride_length": float(stride_length),
+        "swing_clearance": float(swing_clearance),
+        "single_support": float(single_support_score),
+        "support_steps": float(support_steps),
+        "support_phase_score": float(support_phase_score),
+        "alternating_step": float(alternating_step),
+        "support_stall": float(support_stall),
+        "airborne": float(airborne),
         "auxiliary_penalty": float(auxiliary_penalty),
         "velocity_error": float(velocity - reference_velocity),
         "acceleration_error": float(acceleration - reference_acceleration),
@@ -246,6 +325,8 @@ class CommandBipedalWalker(BipedalWalker):
         self.actual_acceleration = 0.0
         self.previous_velocity = 0.0
         self.previous_action = np.zeros(4, dtype=np.float32)
+        self.last_support_leg = 0
+        self.support_steps = 0
         self._last_base_observation: np.ndarray | None = None
         self._last_left_lidar = np.ones(LEFT_LIDAR_DIM, dtype=np.float32)
         self._during_base_reset = False
@@ -258,6 +339,9 @@ class CommandBipedalWalker(BipedalWalker):
             extra_high.extend([1.0] * LEFT_LIDAR_DIM)
         extra_low.extend([-1.0, -2.0, -1.0, -2.0, 0.0])
         extra_high.extend([1.0, 2.0, 1.0, 2.0, 2.0])
+        if self.command_config.include_support_phase:
+            extra_low.extend([-1.0, 0.0])
+            extra_high.extend([1.0, 2.0])
         low = np.concatenate(
             [self.observation_space.low, np.asarray(extra_low, dtype=np.float32)]
         )
@@ -271,6 +355,8 @@ class CommandBipedalWalker(BipedalWalker):
         self.actual_acceleration = 0.0
         self.previous_velocity = 0.0
         self.previous_action.fill(0.0)
+        self.last_support_leg = 0
+        self.support_steps = 0
         self.command_steps_remaining = 0
         self.cycle_index = 0
         self._sample_next_command(initial=True)
@@ -290,7 +376,19 @@ class CommandBipedalWalker(BipedalWalker):
             self.command_steps_remaining = config.command_hold_max_steps
             return
         if self.command_mode == "cycle":
-            commands = (0.0, config.command_speed, 0.0, -config.command_speed)
+            middle_speed = 0.5 * (
+                config.minimum_command_speed + config.command_speed
+            )
+            commands = (
+                0.0,
+                config.minimum_command_speed,
+                middle_speed,
+                config.command_speed,
+                0.0,
+                -config.minimum_command_speed,
+                -middle_speed,
+                -config.command_speed,
+            )
             if not initial:
                 self.cycle_index = (self.cycle_index + 1) % len(commands)
             self.raw_command = commands[self.cycle_index]
@@ -303,7 +401,10 @@ class CommandBipedalWalker(BipedalWalker):
             self.raw_command = 0.0
         else:
             direction = -1.0 if self.np_random.random() < 0.5 else 1.0
-            self.raw_command = direction * config.command_speed
+            magnitude = self.np_random.uniform(
+                config.minimum_command_speed, config.command_speed
+            )
+            self.raw_command = direction * float(magnitude)
         self.command_steps_remaining = int(
             self.np_random.integers(
                 config.command_hold_min_steps,
@@ -358,6 +459,42 @@ class CommandBipedalWalker(BipedalWalker):
     def _base_height(self) -> float:
         return float(self.hull.position.y) - self._ground_height()
 
+    def _foot_position_and_clearance(self, leg_index: int) -> tuple[float, float]:
+        foot = self.legs[leg_index].GetWorldPoint((0.0, -LEG_H / 2.0))
+        foot_x = float(foot[0])
+        ground_y = float(
+            np.interp(
+                foot_x,
+                np.asarray(self.terrain_x),
+                np.asarray(self.terrain_y),
+            )
+        )
+        return foot_x, max(0.0, float(foot[1]) - ground_y)
+
+    def _update_support_phase(
+        self, left_contact: bool, right_contact: bool
+    ) -> tuple[int, bool]:
+        support_leg = 0
+        if left_contact and not right_contact:
+            support_leg = 1
+        elif right_contact and not left_contact:
+            support_leg = -1
+
+        alternating_step = False
+        if support_leg != 0:
+            if self.last_support_leg == 0:
+                self.last_support_leg = support_leg
+                self.support_steps = 0
+            elif support_leg != self.last_support_leg:
+                self.last_support_leg = support_leg
+                self.support_steps = 0
+                alternating_step = True
+            else:
+                self.support_steps += 1
+        else:
+            self.support_steps += 1
+        return support_leg, alternating_step
+
     def _scan_left_lidar(self) -> np.ndarray:
         if not self.command_config.include_left_lidar:
             return np.empty(0, dtype=np.float32)
@@ -408,6 +545,17 @@ class CommandBipedalWalker(BipedalWalker):
                 ),
             ]
         )
+        if config.include_support_phase:
+            features.extend(
+                [
+                    float(self.last_support_leg),
+                    float(
+                        np.clip(
+                            self.support_steps / config.max_support_steps, 0.0, 2.0
+                        )
+                    ),
+                ]
+            )
         return np.concatenate(
             [
                 np.asarray(base_observation, dtype=np.float32),
@@ -426,6 +574,8 @@ class CommandBipedalWalker(BipedalWalker):
         self.actual_acceleration = 0.0
         self.previous_velocity = 0.0
         self.previous_action.fill(0.0)
+        self.last_support_leg = 0
+        self.support_steps = 0
         self._during_base_reset = True
         try:
             base_observation, info = super().reset(seed=seed, options=options)
@@ -466,6 +616,21 @@ class CommandBipedalWalker(BipedalWalker):
             or float(self.hull.position.x) >= maximum_x
         )
         height = self._base_height()
+        left_contact = bool(base_observation[8] > 0.5)
+        right_contact = bool(base_observation[13] > 0.5)
+        left_foot_x, left_clearance = self._foot_position_and_clearance(1)
+        right_foot_x, right_clearance = self._foot_position_and_clearance(3)
+        single_support = left_contact != right_contact
+        support_leg, alternating_step = self._update_support_phase(
+            left_contact, right_contact
+        )
+        if left_contact and not right_contact:
+            swing_clearance = right_clearance
+        elif right_contact and not left_contact:
+            swing_clearance = left_clearance
+        else:
+            swing_clearance = 0.0
+        stride_length = abs(left_foot_x - right_foot_x)
         reward, reward_info = compute_command_reward(
             velocity=velocity,
             acceleration=self.actual_acceleration,
@@ -475,12 +640,17 @@ class CommandBipedalWalker(BipedalWalker):
             torso_angle=float(self.hull.angle),
             angular_velocity=float(self.hull.angularVelocity),
             vertical_velocity=float(self.hull.linearVelocity.y),
-            left_contact=bool(base_observation[8] > 0.5),
-            right_contact=bool(base_observation[13] > 0.5),
+            left_contact=left_contact,
+            right_contact=right_contact,
             action=action,
             previous_action=self.previous_action,
             terminated=terminated,
             config=self.command_config,
+            stride_length=stride_length,
+            swing_clearance=swing_clearance,
+            single_support=single_support,
+            support_steps=self.support_steps,
+            alternating_step=alternating_step,
         )
         self.previous_action = action.copy()
         self._last_base_observation = np.asarray(base_observation, dtype=np.float32)
@@ -496,6 +666,7 @@ class CommandBipedalWalker(BipedalWalker):
                 "actual_velocity": velocity,
                 "actual_acceleration": float(self.actual_acceleration),
                 "height": height,
+                "support_leg": float(support_leg),
             }
         )
         self._advance_command_schedule()

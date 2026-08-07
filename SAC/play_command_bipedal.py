@@ -42,7 +42,10 @@ def load_agent(
         Config(params=None, capacity=1, epoch=1, n_step=1, reward_scale=1.0),
     )
     load_checkpoint(checkpoint, agent)
-    return agent, CommandBipedalConfig(**payload["env_config"])
+    env_values = dict(payload["env_config"])
+    if "include_support_phase" not in env_values:
+        env_values["include_support_phase"] = int(model["obs_dim"]) >= 41
+    return agent, CommandBipedalConfig(**env_values)
 
 
 def play(checkpoint: Path, device: str, seed: int) -> None:

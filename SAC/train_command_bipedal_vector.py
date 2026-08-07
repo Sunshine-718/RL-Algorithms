@@ -57,6 +57,8 @@ def prepare_training_args(args: argparse.Namespace) -> argparse.Namespace:
         or getattr(args, "eval_episodes", 1) < 1
     ):
         raise ValueError("evaluation and checkpoint intervals must be positive")
+    if getattr(args, "keep_checkpoints", 1) < 0:
+        raise ValueError("keep_checkpoints cannot be negative")
     if getattr(args, "gradient_steps_per_vector_step", 0) < 0:
         raise ValueError("gradient_steps_per_vector_step cannot be negative")
     return args
@@ -65,6 +67,7 @@ def prepare_training_args(args: argparse.Namespace) -> argparse.Namespace:
 def build_env_config(args: argparse.Namespace) -> CommandBipedalConfig:
     return CommandBipedalConfig(
         command_speed=args.command_speed,
+        minimum_command_speed=args.minimum_command_speed,
         command_hold_min_steps=max(1, round(args.command_hold_min_seconds * FPS)),
         command_hold_max_steps=max(1, round(args.command_hold_max_seconds * FPS)),
         standing_probability=args.standing_probability,
@@ -73,6 +76,15 @@ def build_env_config(args: argparse.Namespace) -> CommandBipedalConfig:
         acceleration_limit=args.acceleration_limit,
         jerk_limit=args.jerk_limit,
         acceleration_filter=args.acceleration_filter,
+        action_penalty_weight=args.action_penalty_weight,
+        action_rate_penalty_weight=args.action_rate_penalty_weight,
+        gait_reward_weight=args.gait_reward_weight,
+        target_stride_length=args.target_stride_length,
+        target_swing_clearance=args.target_swing_clearance,
+        max_support_steps=max(1, round(args.max_support_seconds * FPS)),
+        alternating_step_reward_weight=args.alternating_step_reward_weight,
+        support_stall_penalty_weight=args.support_stall_penalty_weight,
+        airborne_penalty_weight=args.airborne_penalty_weight,
         max_episode_steps=args.max_episode_steps,
     )
 
@@ -262,6 +274,15 @@ def _append_csv(path: Path, data: dict[str, Any]) -> None:
         writer.writerow(data)
 
 
+def prune_checkpoints(run_dir: Path, keep: int) -> None:
+    """Bound disk use while preserving latest.pt and the newest numbered saves."""
+    if keep == 0:
+        return
+    checkpoints = sorted(run_dir.glob("checkpoint_*.pt"))
+    for checkpoint in checkpoints[:-keep]:
+        checkpoint.unlink()
+
+
 def _vector_info_value(
     infos: dict[str, Any], key: str, index: int, default: float = 0.0
 ) -> float:
@@ -284,6 +305,12 @@ def evaluate(
     velocity_errors: list[float] = []
     acceleration_errors: list[float] = []
     standing_heights: list[float] = []
+    stride_lengths: list[float] = []
+    swing_clearances: list[float] = []
+    single_support: list[float] = []
+    alternating_steps: list[float] = []
+    support_legs: list[float] = []
+    airborne: list[float] = []
     try:
         for episode in range(episodes):
             observation, _ = env.reset(seed=seed + episode)
@@ -296,6 +323,15 @@ def evaluate(
                 acceleration_errors.append(float(info["acceleration_error"]) ** 2)
                 if float(info["stand_gate"]) > 0.8:
                     standing_heights.append(float(info["height"]))
+                if float(info["movement_gate"]) > 0.8:
+                    support = float(info["single_support"])
+                    single_support.append(support)
+                    alternating_steps.append(float(info["alternating_step"]))
+                    airborne.append(float(info["airborne"]))
+                    if support > 0.5:
+                        stride_lengths.append(float(info["stride_length"]))
+                        swing_clearances.append(float(info["swing_clearance"]))
+                        support_legs.append(float(info["support_leg"]))
                 if terminated or truncated:
                     break
             returns.append(episode_return)
@@ -309,6 +345,22 @@ def evaluate(
         "eval_standing_height": float(np.mean(standing_heights))
         if standing_heights
         else 0.0,
+        "eval_stride_length": float(np.mean(stride_lengths))
+        if stride_lengths
+        else 0.0,
+        "eval_swing_clearance": float(np.mean(swing_clearances))
+        if swing_clearances
+        else 0.0,
+        "eval_single_support_rate": float(np.mean(single_support))
+        if single_support
+        else 0.0,
+        "eval_alternating_step_rate_hz": float(FPS * np.mean(alternating_steps))
+        if alternating_steps
+        else 0.0,
+        "eval_support_balance_error": float(abs(np.mean(support_legs)))
+        if support_legs
+        else 1.0,
+        "eval_airborne_rate": float(np.mean(airborne)) if airborne else 0.0,
     }
 
 
@@ -517,6 +569,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     model_config,
                     env_config,
                 )
+                prune_checkpoints(args.run_dir, args.keep_checkpoints)
                 next_checkpoint += args.checkpoint_every
 
             if global_step >= next_status:
@@ -602,19 +655,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--alpha", type=float, default=0.2)
     parser.add_argument("--alpha-lr", type=float, default=3e-4)
     parser.add_argument("--actor-quantile-fraction", type=float, default=1.0)
-    parser.add_argument("--command-speed", type=float, default=1.5)
-    parser.add_argument("--command-hold-min-seconds", type=float, default=1.0)
-    parser.add_argument("--command-hold-max-seconds", type=float, default=3.0)
-    parser.add_argument("--standing-probability", type=float, default=0.35)
+    parser.add_argument("--command-speed", type=float, default=3.0)
+    parser.add_argument("--minimum-command-speed", type=float, default=1.0)
+    parser.add_argument("--command-hold-min-seconds", type=float, default=2.0)
+    parser.add_argument("--command-hold-max-seconds", type=float, default=5.0)
+    parser.add_argument("--standing-probability", type=float, default=0.30)
     parser.add_argument("--settling-time", type=float, default=1.5)
     parser.add_argument("--reference-damping", type=float, default=1.0)
     parser.add_argument("--acceleration-limit", type=float, default=3.0)
     parser.add_argument("--jerk-limit", type=float, default=12.0)
     parser.add_argument("--acceleration-filter", type=float, default=0.85)
+    parser.add_argument("--action-penalty-weight", type=float, default=0.004)
+    parser.add_argument("--action-rate-penalty-weight", type=float, default=0.008)
+    parser.add_argument("--gait-reward-weight", type=float, default=0.5)
+    parser.add_argument("--target-stride-length", type=float, default=1.0)
+    parser.add_argument("--target-swing-clearance", type=float, default=0.28)
+    parser.add_argument("--max-support-seconds", type=float, default=0.7)
+    parser.add_argument("--alternating-step-reward-weight", type=float, default=0.5)
+    parser.add_argument("--support-stall-penalty-weight", type=float, default=0.5)
+    parser.add_argument("--airborne-penalty-weight", type=float, default=0.25)
     parser.add_argument("--max-episode-steps", type=int, default=1600)
     parser.add_argument("--eval-every", type=int, default=20_000)
     parser.add_argument("--eval-episodes", type=int, default=3)
     parser.add_argument("--checkpoint-every", type=int, default=20_000)
+    parser.add_argument(
+        "--keep-checkpoints",
+        type=int,
+        default=20,
+        help="Keep this many numbered checkpoints; use 0 to retain all.",
+    )
     parser.add_argument("--status-every", type=int, default=1_000)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--smoke-test", action="store_true")
