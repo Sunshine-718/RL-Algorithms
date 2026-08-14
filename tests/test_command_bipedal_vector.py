@@ -1,10 +1,13 @@
 import argparse
+import contextlib
+import io
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
+import torch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,14 +15,21 @@ SAC = ROOT / "SAC"
 sys.path.insert(0, str(SAC))
 
 from command_bipedal_env import CommandBipedalConfig  # noqa: E402
+from qrsac_continuous import (  # noqa: E402
+    Config,
+    ContinuousSAC,
+    ContinuousSACAgent,
+)
 from replaybuffer import ReplayBuffer  # noqa: E402
 from train_command_bipedal_vector import (  # noqa: E402
     build_env_config,
     build_parser,
     flush_episode,
+    load_checkpoint,
     make_vector_env,
     prepare_training_args,
     prune_checkpoints,
+    save_checkpoint,
 )
 
 
@@ -35,6 +45,65 @@ class FakeAgent:
 
 
 class CommandVectorTrainerTests(unittest.TestCase):
+    def test_v1_checkpoint_resets_temperature_during_migration(self):
+        def make_agent():
+            network = ContinuousSAC(
+                1e-3,
+                1e-3,
+                obs_dim=3,
+                h_dim=8,
+                action_dim=2,
+                num_quantiles=5,
+                alpha=0.2,
+                device="cpu",
+            )
+            return ContinuousSACAgent(
+                "test",
+                network,
+                Config(
+                    params=None,
+                    capacity=8,
+                    epoch=1,
+                    reward_scale=1.0,
+                    n_step=1,
+                ),
+            )
+
+        source = make_agent()
+        with torch.no_grad():
+            next(source.net.hidden.parameters()).fill_(0.125)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "checkpoint.pt"
+            save_checkpoint(
+                path,
+                source,
+                trainer_state={"steps": 10},
+                model_config={"name": "test"},
+                env_config=CommandBipedalConfig(),
+            )
+            payload = torch.load(path, map_location="cpu", weights_only=False)
+            self.assertEqual(payload["format_version"], 2)
+            payload["format_version"] = 1
+            payload["model"]["alpha"] = torch.tensor([[9.65]])
+            payload["target_model"]["alpha"] = torch.tensor([[9.65]])
+            torch.save(payload, path)
+
+            restored = make_agent()
+            with contextlib.redirect_stdout(io.StringIO()):
+                trainer_state, model_config, _ = load_checkpoint(path, restored)
+
+        self.assertEqual(trainer_state, {"steps": 10})
+        self.assertEqual(model_config, {"name": "test"})
+        self.assertAlmostEqual(restored.alpha, 0.2, places=6)
+        self.assertAlmostEqual(
+            float(restored.target_net.alpha.exp().item()), 0.2, places=6
+        )
+        torch.testing.assert_close(
+            next(restored.net.hidden.parameters()),
+            next(source.net.hidden.parameters()),
+        )
+
     def test_default_training_config_uses_gait_reward_v2_without_more_observations(self):
         args = build_parser().parse_args([])
         config = build_env_config(args)

@@ -236,7 +236,7 @@ def save_checkpoint(
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "format_version": 1,
+        "format_version": 2,
         "model": agent.net.state_dict(),
         "target_model": agent.target_net.state_dict(),
         "actor_opt": agent.net.actor_opt.state_dict(),
@@ -257,16 +257,26 @@ def load_checkpoint(
     expected_model_config: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     payload = _torch_load(path, agent.net.device)
-    if payload.get("format_version") != 1:
+    format_version = payload.get("format_version")
+    if format_version not in (1, 2):
         raise ValueError(f"unsupported checkpoint format: {payload.get('format_version')}")
     model_config = payload["model_config"]
     if expected_model_config is not None and model_config != expected_model_config:
         raise ValueError("checkpoint model configuration does not match training arguments")
-    agent.net.load_state_dict(payload["model"], strict=True)
-    agent.target_net.load_state_dict(payload["target_model"], strict=True)
+    model_state = dict(payload["model"])
+    target_model_state = dict(payload["target_model"])
+    reset_temperature = format_version == 1
+    if reset_temperature:
+        model_state["alpha"] = agent.net.alpha.detach().clone()
+        target_model_state["alpha"] = agent.target_net.alpha.detach().clone()
+    agent.net.load_state_dict(model_state, strict=True)
+    agent.target_net.load_state_dict(target_model_state, strict=True)
     agent.net.actor_opt.load_state_dict(payload["actor_opt"])
     agent.net.critic_opt.load_state_dict(payload["critic_opt"])
-    agent.net.alpha_opt.load_state_dict(payload["alpha_opt"])
+    if reset_temperature:
+        print("Reset legacy SAC temperature state.")
+    else:
+        agent.net.alpha_opt.load_state_dict(payload["alpha_opt"])
     return payload.get("trainer_state", {}), model_config, payload["env_config"]
 
 

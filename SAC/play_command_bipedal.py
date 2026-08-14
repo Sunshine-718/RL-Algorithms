@@ -20,7 +20,7 @@ def load_agent(
         payload = torch.load(checkpoint, map_location=device, weights_only=False)
     except TypeError:
         payload = torch.load(checkpoint, map_location=device)
-    if payload.get("format_version") != 1:
+    if payload.get("format_version") not in (1, 2):
         raise ValueError("unsupported checkpoint format")
     model = payload["model_config"]
     network = ContinuousSAC(

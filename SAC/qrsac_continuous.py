@@ -15,7 +15,8 @@ from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
 from common import (
     NetworkBase, AgentBase, quantile_huber_loss, ResidualBlock,
-    make_train_test_env, single_spaces, reset_env, step_env,
+    continuous_temperature_loss, make_train_test_env,
+    single_spaces, reset_env, step_env,
     reset_done_envs, flush_episode,
 )
 
@@ -152,7 +153,7 @@ class ContinuousSACAgent(AgentBase):
     @property
     @torch.no_grad()
     def alpha(self):
-        return min(float(self.net.alpha.exp().item()), 1)
+        return float(self.net.alpha.exp().item())
 
     @torch.no_grad()
     def td_target(self, reward, next_state, terminated, n):
@@ -213,9 +214,9 @@ class ContinuousSACAgent(AgentBase):
                             self.net.actor_opt.step()
                     self.net.actor_opt.zero_grad()
 
-                    alpha_loss = -(
-                        self.net.alpha * (log_prob.detach() + self.target_entropy)
-                    ).mean()
+                    alpha_loss = continuous_temperature_loss(
+                        self.net.alpha, log_prob, self.target_entropy
+                    )
                     self.net.alpha_opt.zero_grad()
                     alpha_step_ok = bool(torch.isfinite(alpha_loss))
                     if alpha_step_ok:

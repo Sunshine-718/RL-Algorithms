@@ -5,6 +5,9 @@ import numpy as np
 from pathlib import Path
 
 
+SAC_TEMPERATURE_VERSION = 2
+
+
 def _unwrap_env(env):
     return env.unwrapped
 
@@ -79,6 +82,20 @@ def flush_episode(agent, transitions):
     transitions.clear()
 
 
+def continuous_temperature_loss(log_alpha, log_prob, target_entropy):
+    entropy_error = (log_prob + target_entropy).detach()
+    return -(log_alpha * entropy_error).mean()
+
+
+def discrete_temperature_loss(
+    log_alpha, log_probs, probabilities, target_entropy
+):
+    entropy_error = (log_probs + target_entropy).detach()
+    return -(
+        probabilities.detach() * log_alpha * entropy_error
+    ).sum(dim=-1).mean()
+
+
 def quantile_huber_loss(pred, target, tau, kappa=1.0):
     """Pairwise quantile Huber loss for prediction and target distributions."""
     td_error = target.unsqueeze(1) - pred.unsqueeze(2)
@@ -133,21 +150,32 @@ class NetworkBase(nn.Module):
                           "actor_opt": self.actor_opt.state_dict(),
                           "critic_opt": self.critic_opt.state_dict(),
                           "alpha_opt": self.alpha_opt.state_dict(),
-                          "alpha": self.alpha.detach().clone()}
+                          "temperature_version": SAC_TEMPERATURE_VERSION}
             torch.save(state_dict, path)
 
     def load(self, path=None):
         try:
             if path is not None:
                 state_dict = torch.load(path, map_location=self.device)
-                model_state = state_dict["model"]
-                if "alpha" not in model_state and "alpha" in state_dict:
+                model_state = dict(state_dict["model"])
+                temperature_version = int(
+                    state_dict.get("temperature_version", 1)
+                )
+                reset_temperature = (
+                    temperature_version < SAC_TEMPERATURE_VERSION
+                )
+                if reset_temperature:
+                    model_state["alpha"] = self.alpha.detach().clone()
+                elif "alpha" not in model_state and "alpha" in state_dict:
                     model_state = dict(model_state)
                     model_state["alpha"] = state_dict["alpha"].detach()
                 self.load_state_dict(model_state)
                 self.actor_opt.load_state_dict(state_dict["actor_opt"])
                 self.critic_opt.load_state_dict(state_dict["critic_opt"])
-                self.alpha_opt.load_state_dict(state_dict["alpha_opt"])
+                if reset_temperature:
+                    print("Reset legacy SAC temperature state.")
+                else:
+                    self.alpha_opt.load_state_dict(state_dict["alpha_opt"])
         except Exception as e:
             print('Failed to load parameters.')
             print(e)

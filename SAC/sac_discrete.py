@@ -13,7 +13,8 @@ import gymnasium as gym
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
 from common import (
-    NetworkBase, AgentBase, ResidualBlock, make_train_test_env,
+    NetworkBase, AgentBase, ResidualBlock, discrete_temperature_loss,
+    make_train_test_env,
     single_spaces, reset_env, step_env, reset_done_envs, flush_episode,
 )
 
@@ -113,7 +114,7 @@ class DiscreteSACAgent(AgentBase):
     @property
     @torch.no_grad()
     def alpha(self):
-        return min(float(self.net.alpha.exp().item()), 1)
+        return float(self.net.alpha.exp().item())
 
     @torch.no_grad()
     def td_target(self, reward, next_state, terminated, n):
@@ -151,7 +152,9 @@ class DiscreteSACAgent(AgentBase):
                 nn.utils.clip_grad_norm_(self.net.pi.parameters(), 0.5)
                 self.net.actor_opt.step()
 
-                alpha_loss = -(prob.detach() * (self.net.alpha.exp() * (log_probs.detach() + self.target_entropy))).sum(dim=1).mean()
+                alpha_loss = discrete_temperature_loss(
+                    self.net.alpha, log_probs, prob, self.target_entropy
+                )
                 self.net.alpha_opt.zero_grad()
                 alpha_loss.backward()
                 nn.utils.clip_grad_norm_(self.net.alpha, 0.1)
