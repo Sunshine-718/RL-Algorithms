@@ -739,7 +739,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("runs/qrsac_command_bipedal_gait_v2"),
     )
     parser.add_argument("--total-steps", type=int, default=1_000_000)
-    parser.add_argument("--num-envs", type=int, default=8)
+    parser.add_argument("--num-envs", type=int, default=16)
     parser.add_argument("--vector-mode", choices=("async", "sync"), default="async")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument(

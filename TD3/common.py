@@ -11,7 +11,7 @@ def _unwrap_env(env):
     return env.unwrapped
 
 
-def make_train_test_env(env_id, update, num_envs=8, unwrap=False,
+def make_train_test_env(env_id, update, num_envs=16, unwrap=False,
                         rescale_action=False, **kwargs):
     if bool(update):
         env = gym.make_vec(

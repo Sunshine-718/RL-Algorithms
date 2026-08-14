@@ -142,7 +142,7 @@ class QRDoubleDQNAgent(DQNAgentBase):
 if __name__ == "__main__":
     update = 1
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    num_envs = 8 if bool(update) else 1
+    num_envs = 16 if bool(update) else 1
     env = make_train_test_env("CartPole-v1", update, num_envs, unwrap=True)
     observation_space, action_space = single_spaces(env, update)
     action_dim = action_space.n

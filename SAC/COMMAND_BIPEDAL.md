@@ -46,7 +46,7 @@ python3 -m pip install -r requirements.txt
 ```bash
 python3 SAC/train_command_bipedal_vector.py \
   --run-dir runs/qrsac_command_bipedal_gait_v2 \
-  --num-envs 8 \
+  --num-envs 16 \
   --vector-mode async
 ```
 

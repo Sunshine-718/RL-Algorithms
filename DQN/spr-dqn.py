@@ -143,7 +143,7 @@ class DoubleDQNAgent(DQNAgentBase):
 if __name__ == "__main__":
     update = 0
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    num_envs = 8 if bool(update) else 1
+    num_envs = 16 if bool(update) else 1
     env = make_train_test_env(
         "FlappyBird-v0", update, num_envs, unwrap=True, use_lidar=True
     )
