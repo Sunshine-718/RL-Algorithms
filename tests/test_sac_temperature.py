@@ -81,6 +81,7 @@ class SACTemperatureTests(unittest.TestCase):
             ("SAC/sac_discrete.py", "DiscreteSACAgent"),
             ("SAC/qrsac_discrete.py", "DiscreteSACAgent"),
             ("SAC/qrsac_lunarlander.py", "DiscreteSACAgent"),
+            ("SAC/qrsac_bipedalwalker.py", "ContinuousSACAgent"),
         ]
         for relative_path, class_name in cases:
             with self.subTest(path=relative_path):
