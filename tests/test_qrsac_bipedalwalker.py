@@ -49,6 +49,10 @@ class QRSACBipedalWalkerTests(unittest.TestCase):
         self.assertNotIn("command_bipedal", source)
         self.assertNotIn("GaitTracker", source)
         self.assertNotIn("pygame", source)
+        self.assertIn(
+            "rewards = np.where(rewards == -100, -1, rewards)",
+            source,
+        )
 
     def test_vector_environment_and_batch_action_shapes(self):
         env = make_train_test_env(

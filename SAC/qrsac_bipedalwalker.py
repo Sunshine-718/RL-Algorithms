@@ -210,6 +210,7 @@ if __name__ == "__main__":
         next_states, rewards, terminated, truncated, _ = step_env(
             env, actions, update
         )
+        rewards = np.where(rewards == -100, -1, rewards)
         episode_lengths += 1
         truncated = np.logical_or(truncated, episode_lengths > max_steps)
         done = np.logical_or(terminated, truncated)
