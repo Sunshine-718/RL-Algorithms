@@ -1,7 +1,6 @@
 import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
 from torch.optim import NAdam, SGD
 from dataclasses import dataclass
@@ -9,7 +8,6 @@ from replaybuffer import ReplayBuffer
 from copy import deepcopy
 from torch.distributions import Categorical
 
-import gymnasium as gym
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
 from common import (
@@ -19,13 +17,52 @@ from common import (
 )
 
 
+def mirror_observations(observations):
+    observations = np.asarray(observations)
+    if observations.ndim == 0 or observations.shape[-1] != 8:
+        raise ValueError("LunarLander observations must have 8 elements")
+
+    mirrored = observations.copy()
+    mirrored[..., 0] = -observations[..., 0]
+    mirrored[..., 2] = -observations[..., 2]
+    mirrored[..., 4] = -observations[..., 4]
+    mirrored[..., 5] = -observations[..., 5]
+    mirrored[..., [6, 7]] = observations[..., [7, 6]]
+    return mirrored
+
+
+def mirror_actions(actions):
+    actions = np.asarray(actions)
+    if np.any((actions < 0) | (actions > 3)):
+        raise ValueError("LunarLander discrete actions must be in [0, 3]")
+
+    mirrored = np.where(actions == 1, 3, np.where(actions == 3, 1, actions))
+    return int(mirrored) if mirrored.ndim == 0 else mirrored
+
+
+def flush_episode_with_mirror(agent, transitions):
+    states, actions, rewards, next_states, terminated, truncated = zip(
+        *transitions
+    )
+    mirrored_transitions = list(zip(
+        mirror_observations(np.stack(states)),
+        mirror_actions(np.asarray(actions)),
+        rewards,
+        mirror_observations(np.stack(next_states)),
+        terminated,
+        truncated,
+    ))
+    flush_episode(agent, transitions)
+    flush_episode(agent, mirrored_transitions)
+
+
 @dataclass
 class Config:
     discount: float = 0.99
     params: str = './params'
     tau: float = 3e-2
     capacity: int = 100000
-    epoch: int = 100
+    epoch: int = 30
     reward_scale: float = 5
     n_step: int = 5
     critic_update_factor: int = 1
@@ -59,7 +96,6 @@ class DiscreteSAC(NetworkBase):
 
     def init_weights(self, m):
         if isinstance(m, nn.Linear):
-            # nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
             nn.init.orthogonal_(m.weight)
             nn.init.constant_(m.bias, 0)
 
@@ -174,21 +210,14 @@ if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     num_envs = 16 if bool(update) else 1
     env = make_train_test_env(
-        "CartPole-v1", update, num_envs, unwrap=True
+        "LunarLander-v3", update, num_envs
     )
     observation_space, action_space = single_spaces(env, update)
-    x_threshold = (
-        env.get_attr("x_threshold")[0] if bool(update) else env.x_threshold
-    )
-    theta_threshold = (
-        env.get_attr("theta_threshold_radians")[0]
-        if bool(update) else env.theta_threshold_radians
-    )
     ac = DiscreteSAC(1e-3, 3e-3, observation_space.shape[0],
                      128, action_space.n, 0, 0.2, 1e-2, 51,
                      device=device)
     config = Config()
-    agent = DiscreteSACAgent('test', ac, config)
+    agent = DiscreteSACAgent('qrsac_lunarlander', ac, config)
     # agent.load()
     agent.n_step = 5
     reward_container = []
@@ -212,13 +241,8 @@ if __name__ == "__main__":
         next_states, rewards, terminated, truncated, _ = step_env(
             env, actions, update
         )
-        x = next_states[:, 0]
-        theta = next_states[:, 2]
-        r1 = (x_threshold - np.abs(x)) / x_threshold - 0.8
-        r2 = (theta_threshold - np.abs(theta)) / theta_threshold - 0.5
-        rewards = 2 * r1 + r2
         episode_lengths += 1
-        truncated = np.logical_or(truncated, episode_lengths > max_steps)
+        truncated = np.logical_or(truncated, episode_lengths >= max_steps)
         done = np.logical_or(terminated, truncated)
         for env_id in range(num_envs):
             if completed_episodes >= total_episodes:
@@ -236,7 +260,7 @@ if __name__ == "__main__":
             if not done[env_id]:
                 continue
             if bool(update):
-                flush_episode(agent, episode_caches[env_id])
+                flush_episode_with_mirror(agent, episode_caches[env_id])
                 if completed_episodes != 0:
                     agent.step()
             i = completed_episodes

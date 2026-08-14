@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import gymnasium as gym
 import numpy as np
+from pathlib import Path
 
 
 def _unwrap_env(env):
@@ -127,6 +128,7 @@ class NetworkBase(nn.Module):
 
     def save(self, path=None):
         if path is not None:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
             state_dict = {"model": self.state_dict(),
                           "actor_opt": self.actor_opt.state_dict(),
                           "critic_opt": self.critic_opt.state_dict(),

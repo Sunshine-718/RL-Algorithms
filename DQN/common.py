@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torch.optim import NAdam, SGD
 import gymnasium as gym
 import numpy as np
+from pathlib import Path
 
 
 def _unwrap_env(env):
@@ -145,6 +146,7 @@ class NNBase(nn.Module):
 
     def save(self, path=None):
         if path is not None:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
             torch.save(self.state_dict(), path)
 
     def load(self, path=None):
