@@ -20,6 +20,7 @@ from qrsac_bipedalwalker import (  # noqa: E402
     Config,
     ContinuousSAC,
     ContinuousSACAgent,
+    shape_rewards,
 )
 
 
@@ -49,10 +50,18 @@ class QRSACBipedalWalkerTests(unittest.TestCase):
         self.assertNotIn("command_bipedal", source)
         self.assertNotIn("GaitTracker", source)
         self.assertNotIn("pygame", source)
-        self.assertIn(
-            "rewards = np.where(rewards == -100, -1, rewards)",
-            source,
-        )
+
+    def test_removes_energy_penalty_and_replaces_fall_penalty(self):
+        rewards = np.asarray([1.0, -100.0], dtype=np.float32)
+        actions = np.asarray([
+            [1.0, -0.5, 0.0, 2.0],
+            [1.0, 1.0, 1.0, 1.0],
+        ], dtype=np.float32)
+
+        shaped_rewards = shape_rewards(rewards, actions)
+
+        self.assertAlmostEqual(shaped_rewards[0], 1.0 + 0.028 * 2.5)
+        self.assertEqual(shaped_rewards[1], -1.0)
 
     def test_vector_environment_and_batch_action_shapes(self):
         env = make_train_test_env(
