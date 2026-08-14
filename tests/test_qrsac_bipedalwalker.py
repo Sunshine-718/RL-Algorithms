@@ -51,17 +51,15 @@ class QRSACBipedalWalkerTests(unittest.TestCase):
         self.assertNotIn("GaitTracker", source)
         self.assertNotIn("pygame", source)
 
-    def test_removes_energy_penalty_and_replaces_fall_penalty(self):
-        rewards = np.asarray([1.0, -100.0], dtype=np.float32)
-        actions = np.asarray([
-            [1.0, -0.5, 0.0, 2.0],
-            [1.0, 1.0, 1.0, 1.0],
-        ], dtype=np.float32)
+    def test_keeps_energy_penalty_and_replaces_fall_penalty(self):
+        rewards = np.asarray([1.0, -0.5, -100.0], dtype=np.float32)
 
-        shaped_rewards = shape_rewards(rewards, actions)
+        shaped_rewards = shape_rewards(rewards)
 
-        self.assertAlmostEqual(shaped_rewards[0], 1.0 + 0.028 * 2.5)
-        self.assertEqual(shaped_rewards[1], -1.0)
+        np.testing.assert_array_equal(
+            shaped_rewards,
+            np.asarray([1.0, -0.5, -5.0], dtype=np.float32),
+        )
 
     def test_vector_environment_and_batch_action_shapes(self):
         env = make_train_test_env(

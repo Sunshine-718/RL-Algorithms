@@ -29,9 +29,8 @@ class Config:
     critic_update_factor: int = 1
 
 
-def shape_rewards(rewards, actions):
-    energy_penalty = 0.00035 * 80 * np.clip(np.abs(actions), 0, 1).sum(axis=-1)
-    return np.where(rewards == -100, -1, rewards + energy_penalty)
+def shape_rewards(rewards):
+    return np.where(rewards == -100, -5, rewards)
 
 
 class ContinuousSAC(NetworkBase):
@@ -215,7 +214,7 @@ if __name__ == "__main__":
         next_states, rewards, terminated, truncated, _ = step_env(
             env, actions, update
         )
-        rewards = shape_rewards(rewards, actions)
+        rewards = shape_rewards(rewards)
         episode_lengths += 1
         truncated = np.logical_or(truncated, episode_lengths > max_steps)
         done = np.logical_or(terminated, truncated)
