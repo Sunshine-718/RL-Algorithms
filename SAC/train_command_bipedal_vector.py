@@ -748,7 +748,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hidden-dim", type=int, default=256)
     parser.add_argument("--num-quantiles", type=int, default=51)
     parser.add_argument("--dropout", type=float, default=0.0)
-    parser.add_argument("--capacity", type=int, default=500_000)
+    parser.add_argument("--capacity", type=int, default=1_000_000)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--learning-starts", type=int, default=10_000)
     parser.add_argument("--actor-learning-starts", type=int)

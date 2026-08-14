@@ -25,7 +25,7 @@ class Config:
     discount: float = 0.99
     params: str = './params'
     tau: float = 3e-2
-    capacity: int = 100000
+    capacity: int = 1_000_000
     epoch: int = 100
     reward_scale: float = 5
     n_step: int = 5
