@@ -12,7 +12,11 @@ from torch.distributions import Categorical
 import gymnasium as gym
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import NetworkBase, AgentBase, quantile_huber_loss, ResidualBlock
+from common import (
+    NetworkBase, AgentBase, quantile_huber_loss, ResidualBlock,
+    make_train_test_env, single_spaces, reset_env, step_env,
+    reset_done_envs, flush_episode,
+)
 
 
 @dataclass
@@ -101,11 +105,18 @@ class DiscreteSACAgent(AgentBase):
 
     @torch.no_grad()
     def action(self, state, deterministic=False):
-        state = torch.from_numpy(state).float().to(self.net.device).unsqueeze(0)
+        state = np.asarray(state)
+        single_state = state.ndim == 1
+        state = torch.from_numpy(state).float().to(self.net.device)
+        if single_state:
+            state = state.unsqueeze(0)
         self.net.eval()
         action, _, prob = self.net.actor(state, deterministic)
         self.net.train()
-        return action.item(), prob
+        actions = action.squeeze(-1).cpu().numpy()
+        if single_state:
+            return int(actions[0]), prob
+        return actions, prob
 
     @property
     @torch.no_grad()
@@ -161,10 +172,21 @@ class DiscreteSACAgent(AgentBase):
 if __name__ == "__main__":
     update = 1
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    env = env = gym.make("CartPole-v1", render_mode='human' if not update else None).unwrapped
-    # env = RescaleAction(env, -1, 1)
-    ac = DiscreteSAC(1e-3, 3e-3, env.observation_space.shape[0],
-                     128, env.action_space.n, 0, 0.2, 1e-2, 51, device=device)
+    num_envs = 8 if bool(update) else 1
+    env = make_train_test_env(
+        "CartPole-v1", update, num_envs, unwrap=True
+    )
+    observation_space, action_space = single_spaces(env, update)
+    x_threshold = (
+        env.get_attr("x_threshold")[0] if bool(update) else env.x_threshold
+    )
+    theta_threshold = (
+        env.get_attr("theta_threshold_radians")[0]
+        if bool(update) else env.theta_threshold_radians
+    )
+    ac = DiscreteSAC(1e-3, 3e-3, observation_space.shape[0],
+                     128, action_space.n, 0, 0.2, 1e-2, 51,
+                     device=device)
     config = Config()
     agent = DiscreteSACAgent('test', ac, config)
     # agent.load()
@@ -177,44 +199,72 @@ if __name__ == "__main__":
     avg = np.zeros(interval)
     best_avg = -float('inf')
     res = 0
-    iterator = tqdm(range(10000))
+    total_episodes = 10000
+    iterator = tqdm(total=total_episodes)
     plt.ion()
-    for i in iterator:
-        state = env.reset()[0]
-        episode_reward_sum = 0
-        j = 0
-        while True:
-            j += 1
-            action, prob = agent.action(state, not update)
-            next_state, reward, terminated, truncated, _ = env.step(action)
-            x, x_dot, theta, theta_dot = next_state
-            r1 = (env.x_threshold - abs(x)) / env.x_threshold - 0.8
-            r2 = (env.theta_threshold_radians - abs(theta)) / env.theta_threshold_radians - 0.5
-            reward = 2 * r1 + r2
-            if bool(update):
-                agent.cache(state, action, reward, next_state, terminated, truncated)
-            episode_reward_sum += reward
-            state = next_state
-            if terminated or truncated or j > max_steps:
-                if bool(update):
-                    agent.process()
+    states = reset_env(env, update)
+    episode_caches = [[] for _ in range(num_envs)]
+    episode_rewards = np.zeros(num_envs, dtype=np.float64)
+    episode_lengths = np.zeros(num_envs, dtype=np.int64)
+    completed_episodes = 0
+    while completed_episodes < total_episodes:
+        actions, _ = agent.action(states, not update)
+        next_states, rewards, terminated, truncated, _ = step_env(
+            env, actions, update
+        )
+        x = next_states[:, 0]
+        theta = next_states[:, 2]
+        r1 = (x_threshold - np.abs(x)) / x_threshold - 0.8
+        r2 = (theta_threshold - np.abs(theta)) / theta_threshold - 0.5
+        rewards = 2 * r1 + r2
+        episode_lengths += 1
+        truncated = np.logical_or(truncated, episode_lengths > max_steps)
+        done = np.logical_or(terminated, truncated)
+        for env_id in range(num_envs):
+            if completed_episodes >= total_episodes:
                 break
-        if bool(update) and i != 0:
-            agent.step()
-        reward_container.append(episode_reward_sum)
-        avg[i % interval] = episode_reward_sum
-        agent.save()
-        if i % interval == 0 and i != 0:
-            plt.clf()
-            plt.plot(reward_container, label='Reward')
-            plt.title(f'Reward: {reward_container[-1]}')
-            plt.legend()
-            plt.grid()
-            plt.tight_layout()
-            plt.pause(0.1)
-            res = np.mean(avg)
-            if res > best_avg:
-                best_avg = res
-        iterator.set_description(
-            f'episode reward: {episode_reward_sum: .0f}, avg: {res: .0f}, best avg: {best_avg: .0f}, episode_length: {j}, alpha: {agent.alpha: .4f}')
+            if bool(update):
+                episode_caches[env_id].append((
+                    np.asarray(states[env_id]).copy(),
+                    int(actions[env_id]),
+                    float(rewards[env_id]),
+                    np.asarray(next_states[env_id]).copy(),
+                    bool(terminated[env_id]),
+                    bool(truncated[env_id]),
+                ))
+            episode_rewards[env_id] += float(rewards[env_id])
+            if not done[env_id]:
+                continue
+            if bool(update):
+                flush_episode(agent, episode_caches[env_id])
+                if completed_episodes != 0:
+                    agent.step()
+            i = completed_episodes
+            episode_reward_sum = float(episode_rewards[env_id])
+            j = int(episode_lengths[env_id])
+            reward_container.append(episode_reward_sum)
+            avg[i % interval] = episode_reward_sum
+            agent.save()
+            if i % interval == 0 and i != 0:
+                plt.clf()
+                plt.plot(reward_container, label='Reward')
+                plt.title(f'Reward: {reward_container[-1]}')
+                plt.legend()
+                plt.grid()
+                plt.tight_layout()
+                plt.pause(0.1)
+                res = np.mean(avg)
+                if res > best_avg:
+                    best_avg = res
+            iterator.set_description(
+                f'episode reward: {episode_reward_sum: .0f}, avg: {res: .0f}, best avg: {best_avg: .0f}, episode_length: {j}, alpha: {agent.alpha: .4f}')
+            iterator.update(1)
+            completed_episodes += 1
+            episode_rewards[env_id] = 0
+            episode_lengths[env_id] = 0
+        if completed_episodes >= total_episodes:
+            break
+        next_states = reset_done_envs(env, next_states, done, update)
+        states = next_states
+    iterator.close()
     env.close()

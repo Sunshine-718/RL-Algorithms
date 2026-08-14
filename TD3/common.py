@@ -2,6 +2,82 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import NAdam, SGD
+import gymnasium as gym
+import numpy as np
+
+
+def _unwrap_env(env):
+    return env.unwrapped
+
+
+def make_train_test_env(env_id, update, num_envs=8, unwrap=False,
+                        rescale_action=False, **kwargs):
+    if bool(update):
+        env = gym.make_vec(
+            env_id,
+            num_envs=num_envs,
+            vectorization_mode="async",
+            vector_kwargs={
+                "autoreset_mode": gym.vector.AutoresetMode.DISABLED,
+            },
+            wrappers=[_unwrap_env] if unwrap else [],
+            **kwargs,
+        )
+        if rescale_action:
+            env = gym.wrappers.vector.RescaleAction(env, -1, 1)
+        return env
+
+    env = gym.make(env_id, render_mode="human", **kwargs)
+    if unwrap:
+        env = env.unwrapped
+    if rescale_action:
+        env = gym.wrappers.RescaleAction(env, -1, 1)
+    return env
+
+
+def single_spaces(env, update):
+    if bool(update):
+        return env.single_observation_space, env.single_action_space
+    return env.observation_space, env.action_space
+
+
+def reset_env(env, update):
+    state, _ = env.reset()
+    if bool(update):
+        return state
+    return np.expand_dims(state, axis=0)
+
+
+def step_env(env, actions, update):
+    if bool(update):
+        return env.step(actions)
+    next_state, reward, terminated, truncated, info = env.step(actions[0])
+    return (
+        np.expand_dims(next_state, axis=0),
+        np.asarray([reward], dtype=np.float32),
+        np.asarray([terminated], dtype=bool),
+        np.asarray([truncated], dtype=bool),
+        info,
+    )
+
+
+def reset_done_envs(env, next_states, done, update):
+    if not np.any(done):
+        return next_states
+    if bool(update):
+        next_states, _ = env.reset(
+            options={"reset_mask": done.astype(np.bool_)},
+        )
+        return next_states
+    next_state, _ = env.reset()
+    return np.expand_dims(next_state, axis=0)
+
+
+def flush_episode(agent, transitions):
+    for transition in transitions:
+        agent.cache(*transition)
+    agent.process()
+    transitions.clear()
 
 
 def quantile_huber_loss(pred, target, tau, kappa=1.0):

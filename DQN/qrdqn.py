@@ -10,7 +10,11 @@ from copy import deepcopy
 import gymnasium as gym
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-from common import ResidualBlock, NNBase, DQNAgentBase, quantile_huber_loss
+from common import (
+    ResidualBlock, NNBase, DQNAgentBase, quantile_huber_loss,
+    make_train_test_env, single_spaces, reset_env, step_env,
+    reset_done_envs, flush_episode,
+)
 
 
 @dataclass
@@ -85,16 +89,23 @@ class QRDoubleDQNAgent(DQNAgentBase):
 
     @torch.no_grad()
     def action(self, state, deterministic=False):
-        if not deterministic and np.random.random() < self.noise:
-            action = np.random.randint(0, self.n_actions)
+        state = np.asarray(state)
+        single_state = state.ndim == 1
+        state = torch.from_numpy(state).float().to(self.net.device)
+        if single_state:
+            state = state.unsqueeze(0)
+        self.net.eval()
+        greedy_actions = self.net(state).mean(dim=2).argmax(dim=1).cpu().numpy()
+        self.net.train()
+        if deterministic:
+            actions = greedy_actions
         else:
-            state = torch.from_numpy(state).float().unsqueeze(0).to(self.net.device)
-            self.net.eval()
-            q_value = self.net(state)
-            q_mean = q_value.mean(dim=2)
-            action = torch.argmax(q_mean, dim=1).item()
-            self.net.train()
-        return action
+            explore = np.random.random(len(greedy_actions)) < self.noise
+            random_actions = np.random.randint(
+                0, self.n_actions, size=len(greedy_actions)
+            )
+            actions = np.where(explore, random_actions, greedy_actions)
+        return int(actions[0]) if single_state else actions
 
     @torch.no_grad()
     def td_target(self, reward, next_state, terminated, n):
@@ -131,9 +142,14 @@ class QRDoubleDQNAgent(DQNAgentBase):
 if __name__ == "__main__":
     update = 1
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    env = gym.make("CartPole-v1", render_mode='human' if not update else None).unwrapped
-    action_dim = env.action_space.n
-    obs_dim = env.observation_space.shape[0]
+    num_envs = 8 if bool(update) else 1
+    env = make_train_test_env("CartPole-v1", update, num_envs, unwrap=True)
+    observation_space, action_space = single_spaces(env, update)
+    action_dim = action_space.n
+    obs_dim = observation_space.shape[0]
+    x_threshold = env.get_attr("x_threshold")[0] if bool(update) else env.x_threshold
+    theta_threshold = (env.get_attr("theta_threshold_radians")[0]
+                       if bool(update) else env.theta_threshold_radians)
     Q = QRDuelingDQN(1e-3, obs_dim, 128, action_dim, 51, 0., True, device)
     config = Config()
     agent = QRDoubleDQNAgent('test', Q, config)
@@ -147,44 +163,64 @@ if __name__ == "__main__":
     avg = np.zeros(interval)
     best_avg = -float('inf')
     res = 0
-    iterator = tqdm(range(10000))
+    total_episodes = 10000
+    iterator = tqdm(total=total_episodes)
     plt.ion()
-    for i in iterator:
-        state = env.reset()[0]
-        episode_reward_sum = 0
-        j = 0
-        while True:
-            j += 1
-            action = agent.action(state, not update)
-            next_state, _, terminated, truncated, _ = env.step(action)
-            x, x_dot, theta, theta_dot = next_state
-            r1 = (env.x_threshold - abs(x)) / env.x_threshold - 0.8
-            r2 = (env.theta_threshold_radians - abs(theta)) / env.theta_threshold_radians - 0.5
-            reward = 2 * r1 + r2
-            if bool(update):
-                agent.cache(state, action, reward, next_state, terminated, truncated)
-            episode_reward_sum += reward
-            state = next_state
-            if terminated or truncated or j > max_steps:
-                if bool(update):
-                    agent.process()
+    states = reset_env(env, update)
+    episode_caches = [[] for _ in range(num_envs)]
+    episode_rewards = np.zeros(num_envs, dtype=np.float64)
+    episode_lengths = np.zeros(num_envs, dtype=np.int64)
+    completed_episodes = 0
+    while completed_episodes < total_episodes:
+        actions = agent.action(states, not update)
+        next_states, rewards, terminated, truncated, _ = step_env(env, actions, update)
+        x, theta = next_states[:, 0], next_states[:, 2]
+        rewards = (2 * ((x_threshold - np.abs(x)) / x_threshold - 0.8)
+                   + (theta_threshold - np.abs(theta)) / theta_threshold - 0.5)
+        episode_lengths += 1
+        truncated = np.logical_or(truncated, episode_lengths > max_steps)
+        done = np.logical_or(terminated, truncated)
+        for env_id in range(num_envs):
+            if completed_episodes >= total_episodes:
                 break
-        if bool(update) and i != 0:
-            agent.step()
-        reward_container.append(episode_reward_sum)
-        avg[i % interval] = episode_reward_sum
-        agent.save()
-        if i % interval == 0 and i != 0:
-            plt.clf()
-            plt.plot(reward_container, label='Reward')
-            plt.title(f'Reward: {reward_container[-1]}')
-            plt.legend()
-            plt.grid()
-            plt.tight_layout()
-            plt.pause(0.1)
-            res = np.mean(avg)
-            if res > best_avg:
-                best_avg = res
-        iterator.set_description(
-            f'episode reward: {episode_reward_sum: .0f}, avg: {res: .0f}, best avg: {best_avg: .0f}, episode_length: {j}, avg step reward: {episode_reward_sum / j: .3f}')
+            if bool(update):
+                episode_caches[env_id].append((
+                    np.asarray(states[env_id]).copy(), int(actions[env_id]),
+                    float(rewards[env_id]), np.asarray(next_states[env_id]).copy(),
+                    bool(terminated[env_id]), bool(truncated[env_id]),
+                ))
+            episode_rewards[env_id] += float(rewards[env_id])
+            if not done[env_id]:
+                continue
+            if bool(update):
+                flush_episode(agent, episode_caches[env_id])
+                if completed_episodes != 0:
+                    agent.step()
+            i = completed_episodes
+            episode_reward_sum = float(episode_rewards[env_id])
+            j = int(episode_lengths[env_id])
+            reward_container.append(episode_reward_sum)
+            avg[i % interval] = episode_reward_sum
+            agent.save()
+            if i % interval == 0 and i != 0:
+                plt.clf()
+                plt.plot(reward_container, label='Reward')
+                plt.title(f'Reward: {reward_container[-1]}')
+                plt.legend()
+                plt.grid()
+                plt.tight_layout()
+                plt.pause(0.1)
+                res = np.mean(avg)
+                if res > best_avg:
+                    best_avg = res
+            iterator.set_description(
+                f'episode reward: {episode_reward_sum: .0f}, avg: {res: .0f}, best avg: {best_avg: .0f}, episode_length: {j}, avg step reward: {episode_reward_sum / j: .3f}')
+            iterator.update(1)
+            completed_episodes += 1
+            episode_rewards[env_id] = 0
+            episode_lengths[env_id] = 0
+        if completed_episodes >= total_episodes:
+            break
+        states = reset_done_envs(env, next_states, done, update)
+    iterator.close()
     env.close()
