@@ -50,6 +50,8 @@ class Config:
     sequence_length: int = 20
     batch_size: int = 32
     max_grad_norm: float = 0.5
+    auxiliary_loss_weight: float = 1e-1
+    observation_delta_scale: float = 50.
     learning_starts: int = 500
     evaluation_start: int = 100
     evaluation_interval: int = 25
@@ -93,12 +95,22 @@ class RecurrentDuelingDQN(NNBase):
 
         self.apply(self.init_weights)
         nn.init.constant_(self.a[-1].weight, 0)
+        self.action_embed = nn.Embedding(num_actions, recurrent_dim)
+        self.dynamics_head = nn.Sequential(
+            nn.Linear(recurrent_dim * 2, h_dim),
+            nn.SiLU(),
+            nn.Linear(h_dim, obs_dim),
+        )
+        self.action_embed.apply(self.init_weights)
+        self.dynamics_head.apply(self.init_weights)
         self.computes_grad(computes_grad)
         self.to(self.device)
         self.opt = self.configure_optimizer(0.01, lr)
 
     def init_weights(self, module):
         if isinstance(module, nn.Linear):
+            nn.init.orthogonal_(module.weight)
+        elif isinstance(module, nn.Embedding):
             nn.init.orthogonal_(module.weight)
         elif isinstance(module, nn.GRU):
             for name, parameter in module.named_parameters():
@@ -134,17 +146,30 @@ class RecurrentDuelingDQN(NNBase):
             )
         return state
 
-    def forward(self, state, hidden=None):
+    def recurrent_features(self, state, hidden=None):
         state = self._as_sequence(state)
         if hidden is None:
             hidden = self.initial_hidden(state.shape[0])
         feature = self.encoder(state)
         self.gru.flatten_parameters()
-        feature, next_hidden = self.gru(feature, hidden)
-        value = self.v(feature)
-        advantage = self.a(feature)
-        q = value + advantage - advantage.mean(dim=-1, keepdim=True)
-        return q, next_hidden
+        return self.gru(feature, hidden)
+
+    def q_values(self, recurrent_feature):
+        value = self.v(recurrent_feature)
+        advantage = self.a(recurrent_feature)
+        return value + advantage - advantage.mean(dim=-1, keepdim=True)
+
+    def predict_observation_delta(self, recurrent_feature, action):
+        if action.dim() == recurrent_feature.dim() and action.shape[-1] == 1:
+            action = action.squeeze(-1)
+        if action.shape != recurrent_feature.shape[:-1]:
+            raise ValueError('action shape does not match recurrent features')
+        action = self.action_embed(action.long())
+        return self.dynamics_head(torch.cat((recurrent_feature, action), -1))
+
+    def forward(self, state, hidden=None):
+        feature, next_hidden = self.recurrent_features(state, hidden)
+        return self.q_values(feature), next_hidden
 
     def burn_in(self, observation, valid, hidden=None):
         observation = self._as_sequence(observation)
@@ -187,6 +212,8 @@ class DRQNAgent(DQNAgentBase):
         self.sequence_length = config.sequence_length
         self.batch_size = config.batch_size
         self.max_grad_norm = config.max_grad_norm
+        self.auxiliary_loss_weight = config.auxiliary_loss_weight
+        self.observation_delta_scale = config.observation_delta_scale
         self.learning_starts = config.learning_starts
         self._n_step = 1
         self._action_hidden = None
@@ -268,7 +295,10 @@ class DRQNAgent(DQNAgentBase):
                 burn_observation, burn_mask
             )
 
-        q, _ = self.net(observation, online_hidden.detach())
+        recurrent_feature, _ = self.net.recurrent_features(
+            observation, online_hidden.detach()
+        )
+        q = self.net.q_values(recurrent_feature)
         current_q = q[:, :-1].gather(-1, action.long())
 
         with torch.no_grad():
@@ -281,14 +311,25 @@ class DRQNAgent(DQNAgentBase):
             next_q = target_q[:, 1:].gather(-1, next_action)
             target = self.td_target(reward, next_q, terminated)
 
-        elementwise_loss = F.smooth_l1_loss(
+        elementwise_td_loss = F.smooth_l1_loss(
             current_q, target, reduction='none'
         )
-        loss_mask = loss_mask.float()
-        return (
-            (elementwise_loss * loss_mask).sum()
-            / loss_mask.sum().clamp_min(1.)
+        predicted_delta = self.net.predict_observation_delta(
+            recurrent_feature[:, :-1], action
         )
+        observation_delta = (
+            observation[:, 1:] - observation[:, :-1]
+        ) * self.observation_delta_scale
+        elementwise_auxiliary_loss = F.smooth_l1_loss(
+            predicted_delta, observation_delta, reduction='none'
+        ).mean(dim=-1, keepdim=True)
+        loss_mask = loss_mask.float()
+        valid_count = loss_mask.sum().clamp_min(1.)
+        td_loss = (elementwise_td_loss * loss_mask).sum() / valid_count
+        auxiliary_loss = (
+            (elementwise_auxiliary_loss * loss_mask).sum() / valid_count
+        )
+        return td_loss + self.auxiliary_loss_weight * auxiliary_loss
 
     def step(self, batch_size=None):
         batch_size = self.batch_size if batch_size is None else batch_size
