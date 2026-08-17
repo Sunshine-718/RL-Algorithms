@@ -40,6 +40,7 @@ def make_partial_cartpole_env(render_mode=None):
 class Config:
     discount: float = 0.99
     params: str = './params'
+    tau: float = 3e-2
     capacity: int = 1_000_000
     epoch: int = 10
     noise: float = 1.
@@ -50,7 +51,6 @@ class Config:
     batch_size: int = 32
     max_grad_norm: float = 0.5
     learning_starts: int = 500
-    target_update_interval: int = 100
     evaluation_start: int = 100
     evaluation_interval: int = 25
     evaluation_episodes: int = 20
@@ -95,7 +95,7 @@ class RecurrentDuelingDQN(NNBase):
         nn.init.constant_(self.a[-1].weight, 0)
         self.computes_grad(computes_grad)
         self.to(self.device)
-        self.opt = torch.optim.Adam(self.parameters(), lr=lr)
+        self.opt = self.configure_optimizer(0.01, lr)
 
     def init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -179,6 +179,7 @@ class DRQNAgent(DQNAgentBase):
         self.params = config.params
         self.discount = config.discount
         self.epoch = config.epoch
+        self.tau = config.tau
         self.noise = config.noise
         self.min_noise = config.min_noise
         self.decay = config.decay
@@ -187,8 +188,6 @@ class DRQNAgent(DQNAgentBase):
         self.batch_size = config.batch_size
         self.max_grad_norm = config.max_grad_norm
         self.learning_starts = config.learning_starts
-        self.target_update_interval = config.target_update_interval
-        self.gradient_steps = 0
         self._n_step = 1
         self._action_hidden = None
         self.soft_update(tau=1)
@@ -308,9 +307,7 @@ class DRQNAgent(DQNAgentBase):
                     self.net.parameters(), self.max_grad_norm
                 )
                 self.net.opt.step()
-                self.gradient_steps += 1
-                if self.gradient_steps % self.target_update_interval == 0:
-                    self.soft_update(tau=1)
+                self.soft_update()
             self.decay_noise()
         return loss.item() if loss is not None else None
 
@@ -343,8 +340,8 @@ if __name__ == '__main__':
     Q = RecurrentDuelingDQN(
         lr=1e-3,
         obs_dim=env.observation_space.shape[0],
-        h_dim=64,
-        recurrent_dim=64,
+        h_dim=128,
+        recurrent_dim=128,
         num_actions=env.action_space.n,
         recurrent_layers=1,
         device=device,
