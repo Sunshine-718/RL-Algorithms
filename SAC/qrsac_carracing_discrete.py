@@ -73,29 +73,66 @@ class CarRacingDiscreteActor(nn.Module):
 
 
 class CarRacingDiscreteQuantileCritic(nn.Module):
-    def __init__(self, action_dim, num_quantiles=51, latent_dim=512):
+    def __init__(
+        self,
+        action_dim,
+        num_quantiles=51,
+        latent_dim=512,
+        action_embedding_dim=64,
+    ):
         super().__init__()
+        if action_embedding_dim < 1:
+            raise ValueError("action_embedding_dim must be positive")
         self.encoder = ImageEncoder()
         self.state_projector = nn.Sequential(
             nn.Linear(self.encoder.output_dim, latent_dim),
             nn.LayerNorm(latent_dim),
             nn.SiLU(inplace=True),
         )
-        self.quantile_head = nn.Sequential(
-            nn.Linear(latent_dim, latent_dim),
+        self.action_embedding = nn.Embedding(
+            action_dim, action_embedding_dim
+        )
+        self.action_normalizer = nn.Sequential(
+            nn.LayerNorm(action_embedding_dim),
             nn.SiLU(inplace=True),
-            nn.Linear(latent_dim, action_dim * num_quantiles),
+        )
+        self.quantile_head = nn.Sequential(
+            nn.Linear(latent_dim + action_embedding_dim, latent_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(latent_dim, num_quantiles),
         )
         self.action_dim = action_dim
         self.num_quantiles = num_quantiles
+        self.action_embedding_dim = action_embedding_dim
 
-    def forward(self, state):
-        batch_size = state.shape[0] if state.ndim == 4 else 1
-        hidden = self.state_projector(self.encoder(state))
-        quantiles = self.quantile_head(hidden)
-        return quantiles.reshape(
-            batch_size, self.action_dim, self.num_quantiles
+    def forward(self, state, action=None):
+        state_features = self.state_projector(self.encoder(state))
+        batch_size = state_features.shape[0]
+        all_actions = action is None
+        if all_actions:
+            action_indices = torch.arange(
+                self.action_dim, device=state_features.device
+            ).unsqueeze(0).expand(batch_size, -1)
+        else:
+            action_indices = torch.as_tensor(
+                action, device=state_features.device
+            ).long().reshape(batch_size, -1)
+            if action_indices.shape[1] != 1:
+                raise ValueError(
+                    "critic expects one action per state or action=None"
+                )
+
+        action_features = self.action_normalizer(
+            self.action_embedding(action_indices)
         )
+        state_features = state_features.unsqueeze(1).expand(
+            -1, action_indices.shape[1], -1
+        )
+        fused_features = torch.cat(
+            [state_features, action_features], dim=-1
+        )
+        quantiles = self.quantile_head(fused_features)
+        return quantiles if all_actions else quantiles.squeeze(1)
 
 
 class CarRacingDiscreteQRSAC(NetworkBase):
@@ -106,6 +143,7 @@ class CarRacingDiscreteQRSAC(NetworkBase):
         action_dim,
         num_quantiles=51,
         latent_dim=512,
+        action_embedding_dim=64,
         alpha=0.2,
         alpha_lr=1e-2,
         computes_grad=True,
@@ -116,15 +154,23 @@ class CarRacingDiscreteQRSAC(NetworkBase):
             raise ValueError("discrete QRSAC requires at least two actions")
         if num_quantiles < 1:
             raise ValueError("num_quantiles must be positive")
+        if action_embedding_dim < 1:
+            raise ValueError("action_embedding_dim must be positive")
 
         self.actor_network = CarRacingDiscreteActor(
             action_dim, latent_dim
         )
         self.q1 = CarRacingDiscreteQuantileCritic(
-            action_dim, num_quantiles, latent_dim
+            action_dim,
+            num_quantiles,
+            latent_dim,
+            action_embedding_dim,
         )
         self.q2 = CarRacingDiscreteQuantileCritic(
-            action_dim, num_quantiles, latent_dim
+            action_dim,
+            num_quantiles,
+            latent_dim,
+            action_embedding_dim,
         )
         self.alpha = nn.Parameter(
             torch.tensor([[math.log(alpha)]], dtype=torch.float32),
@@ -132,6 +178,7 @@ class CarRacingDiscreteQRSAC(NetworkBase):
         )
         self.action_dim = action_dim
         self.num_quantiles = num_quantiles
+        self.action_embedding_dim = action_embedding_dim
         self.obs_shape = OBSERVATION_SHAPE
         self.device = torch.device(device)
 
@@ -159,6 +206,8 @@ class CarRacingDiscreteQRSAC(NetworkBase):
             nn.init.orthogonal_(module.weight, gain=np.sqrt(2.0))
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.orthogonal_(module.weight)
 
     def actor(self, state, deterministic=False):
         logits = self.actor_network(state)
@@ -170,8 +219,8 @@ class CarRacingDiscreteQRSAC(NetworkBase):
             action = Categorical(probabilities).sample().unsqueeze(-1)
         return action, log_probabilities, probabilities
 
-    def critic(self, state):
-        return self.q1(state), self.q2(state)
+    def critic(self, state, action=None):
+        return self.q1(state, action), self.q2(state, action)
 
     def set_critic_grad(self, requires_grad):
         for parameter in list(self.q1.parameters()) + list(
@@ -264,12 +313,7 @@ class CarRacingDiscreteQRSACAgent(AgentBase):
             td_target = self.td_target(
                 reward, next_state, terminated, n
             )
-            q1, q2 = self.net.critic(state)
-            action_index = action.long().view(batch_size, 1, 1).expand(
-                -1, 1, self.net.num_quantiles
-            )
-            chosen_q1 = q1.gather(1, action_index).squeeze(1)
-            chosen_q2 = q2.gather(1, action_index).squeeze(1)
+            chosen_q1, chosen_q2 = self.net.critic(state, action)
             critic_loss = quantile_huber_loss(
                 chosen_q1, td_target, self.qr_tau
             ) + quantile_huber_loss(
@@ -380,6 +424,7 @@ if __name__ == "__main__":
         action_dim=action_space.n,
         num_quantiles=51,
         latent_dim=512,
+        action_embedding_dim=64,
         alpha=0.2,
         alpha_lr=1e-2,
         device=device,
