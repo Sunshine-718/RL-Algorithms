@@ -40,16 +40,23 @@ def make_partial_cartpole_env(render_mode=None):
 class Config:
     discount: float = 0.99
     params: str = './params'
-    tau: float = 3e-2
     capacity: int = 1_000_000
-    epoch: int = 4
+    epoch: int = 10
     noise: float = 1.
-    min_noise: float = 0.05
-    decay: float = 0.995
+    min_noise: float = 0.02
+    decay: float = 0.993
     burn_in: int = 10
     sequence_length: int = 20
     batch_size: int = 32
     max_grad_norm: float = 0.5
+    learning_starts: int = 500
+    target_update_interval: int = 100
+    evaluation_start: int = 100
+    evaluation_interval: int = 25
+    evaluation_episodes: int = 20
+    solved_score: float = 475.
+    seed: int = 43
+    evaluation_seed: int = 9_900_000
 
 
 class RecurrentDuelingDQN(NNBase):
@@ -88,7 +95,7 @@ class RecurrentDuelingDQN(NNBase):
         nn.init.constant_(self.a[-1].weight, 0)
         self.computes_grad(computes_grad)
         self.to(self.device)
-        self.opt = self.configure_optimizer(0.01, lr)
+        self.opt = torch.optim.Adam(self.parameters(), lr=lr)
 
     def init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -172,7 +179,6 @@ class DRQNAgent(DQNAgentBase):
         self.params = config.params
         self.discount = config.discount
         self.epoch = config.epoch
-        self.tau = config.tau
         self.noise = config.noise
         self.min_noise = config.min_noise
         self.decay = config.decay
@@ -180,6 +186,9 @@ class DRQNAgent(DQNAgentBase):
         self.sequence_length = config.sequence_length
         self.batch_size = config.batch_size
         self.max_grad_norm = config.max_grad_norm
+        self.learning_starts = config.learning_starts
+        self.target_update_interval = config.target_update_interval
+        self.gradient_steps = 0
         self._n_step = 1
         self._action_hidden = None
         self.soft_update(tau=1)
@@ -285,7 +294,8 @@ class DRQNAgent(DQNAgentBase):
     def step(self, batch_size=None):
         batch_size = self.batch_size if batch_size is None else batch_size
         loss = None
-        if self.buffer.can_sample(batch_size):
+        ready = max(batch_size, self.learning_starts)
+        if len(self.buffer) >= ready:
             for _ in range(self.epoch):
                 self.net.opt.zero_grad()
                 self.target_net.eval()
@@ -298,75 +308,133 @@ class DRQNAgent(DQNAgentBase):
                     self.net.parameters(), self.max_grad_norm
                 )
                 self.net.opt.step()
-                self.soft_update()
+                self.gradient_steps += 1
+                if self.gradient_steps % self.target_update_interval == 0:
+                    self.soft_update(tau=1)
             self.decay_noise()
         return loss.item() if loss is not None else None
+
+
+def evaluate_agent(agent, env, episodes, seed):
+    rewards = []
+    for episode in range(episodes):
+        state, _ = env.reset(seed=seed + episode)
+        agent.reset_hidden()
+        episode_reward = 0.
+        done = False
+        while not done:
+            action = agent.action(state, deterministic=True)
+            state, reward, terminated, truncated, _ = env.step(action)
+            episode_reward += reward
+            done = terminated or truncated
+        rewards.append(episode_reward)
+    return np.asarray(rewards, dtype=np.float32)
 
 
 if __name__ == '__main__':
     update = 1
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    config = Config()
+    torch.manual_seed(config.seed)
+    np.random.seed(config.seed)
     env = make_partial_cartpole_env(
         render_mode=None if bool(update) else 'human'
     )
-    config = Config()
     Q = RecurrentDuelingDQN(
         lr=1e-3,
         obs_dim=env.observation_space.shape[0],
-        h_dim=128,
-        recurrent_dim=128,
+        h_dim=64,
+        recurrent_dim=64,
         num_actions=env.action_space.n,
         recurrent_layers=1,
         device=device,
     )
     agent = DRQNAgent('cartpole_drqn', Q, config)
     if not bool(update):
-        agent.load()
+        agent.load('best')
 
     total_episodes = 2000 if bool(update) else 10
     reward_container = []
     loss_container = []
-    best_avg = -float('inf')
+    best_eval_reward = -float('inf')
+    last_eval_reward = float('nan')
     iterator = tqdm(range(total_episodes))
 
-    for episode in iterator:
-        state, _ = env.reset()
-        agent.reset_hidden()
-        episode_cache = []
-        episode_reward = 0.
-        done = False
+    try:
+        for episode in iterator:
+            episode_seed = (
+                config.seed * 10_000 + episode
+                if bool(update)
+                else config.evaluation_seed + episode
+            )
+            state, _ = env.reset(seed=episode_seed)
+            agent.reset_hidden()
+            episode_cache = []
+            episode_reward = 0.
+            done = False
 
-        while not done:
-            action = agent.action(state, deterministic=not bool(update))
-            next_state, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
+            while not done:
+                action = agent.action(
+                    state, deterministic=not bool(update)
+                )
+                next_state, reward, terminated, truncated, _ = env.step(
+                    action
+                )
+                done = terminated or truncated
+                if bool(update):
+                    episode_cache.append((
+                        state.copy(), action, reward, next_state.copy(),
+                        terminated, truncated,
+                    ))
+                state = next_state
+                episode_reward += reward
+
             if bool(update):
-                episode_cache.append((
-                    state.copy(), action, reward, next_state.copy(),
-                    terminated, truncated,
-                ))
-            state = next_state
-            episode_reward += reward
+                flush_episode(agent, episode_cache)
+                loss = agent.step()
+                if loss is not None:
+                    loss_container.append(loss)
 
+            reward_container.append(episode_reward)
+            average_reward = float(np.mean(reward_container[-10:]))
+            if bool(update):
+                agent.save()
+
+            solved = False
+            evaluation_due = (
+                bool(update)
+                and episode + 1 >= config.evaluation_start
+                and (episode + 1) % config.evaluation_interval == 0
+            )
+            if evaluation_due:
+                evaluation_rewards = evaluate_agent(
+                    agent,
+                    env,
+                    config.evaluation_episodes,
+                    config.evaluation_seed,
+                )
+                last_eval_reward = float(evaluation_rewards.mean())
+                if last_eval_reward > best_eval_reward:
+                    best_eval_reward = last_eval_reward
+                    agent.save('best')
+                solved = last_eval_reward >= config.solved_score
+
+            iterator.set_description(
+                f'episode reward: {episode_reward: .0f}, '
+                f'avg: {average_reward: .1f}, '
+                f'eval: {last_eval_reward: .1f}, '
+                f'noise: {agent.noise: .3f}'
+            )
+            if solved:
+                print(
+                    f'Solved at episode {episode + 1}: '
+                    f'evaluation reward {last_eval_reward:.2f}'
+                )
+                break
+    finally:
         if bool(update):
-            flush_episode(agent, episode_cache)
-            loss = agent.step()
-            if loss is not None:
-                loss_container.append(loss)
-
-        reward_container.append(episode_reward)
-        average_reward = float(np.mean(reward_container[-10:]))
-        if bool(update) and average_reward > best_avg:
-            best_avg = average_reward
-            agent.save('best')
-        iterator.set_description(
-            f'episode reward: {episode_reward: .0f}, '
-            f'avg: {average_reward: .1f}, noise: {agent.noise: .3f}'
-        )
-
-    if bool(update):
-        agent.save()
-    env.close()
+            agent.save()
+        env.close()
 
     plt.plot(reward_container, label='Reward')
     plt.xlabel('Episode')
