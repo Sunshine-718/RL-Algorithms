@@ -50,7 +50,7 @@ class Config:
     sequence_length: int = 20
     batch_size: int = 32
     max_grad_norm: float = 0.5
-    auxiliary_loss_weight: float = 1e-1
+    auxiliary_loss_weight: float = 5e-1
     observation_delta_scale: float = 50.
     learning_starts: int = 500
     evaluation_start: int = 100
