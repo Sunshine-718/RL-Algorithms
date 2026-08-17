@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 
-from common import DQNAgentBase, NNBase, ResidualBlock, flush_episode
+from common import DQNAgentBase, NNBase, flush_episode
 from trajectorybuffer import TrajectoryBuffer
 
 
@@ -58,8 +58,8 @@ class RecurrentDuelingDQN(NNBase):
                  device='cpu'):
         super().__init__()
         self.encoder = nn.Sequential(
-            ResidualBlock(obs_dim, h_dim, dropout),
-            ResidualBlock(h_dim, h_dim, dropout),
+            nn.Linear(obs_dim, h_dim),
+            nn.SiLU(),
         )
         self.gru = nn.GRU(
             h_dim,
@@ -69,12 +69,14 @@ class RecurrentDuelingDQN(NNBase):
             dropout=dropout if recurrent_layers > 1 else 0.,
         )
         self.v = nn.Sequential(
-            ResidualBlock(recurrent_dim, h_dim, dropout),
-            ResidualBlock(h_dim, 1),
+            nn.Linear(recurrent_dim, h_dim),
+            nn.SiLU(),
+            nn.Linear(h_dim, 1),
         )
         self.a = nn.Sequential(
-            ResidualBlock(recurrent_dim, h_dim, dropout),
-            ResidualBlock(h_dim, num_actions),
+            nn.Linear(recurrent_dim, h_dim),
+            nn.SiLU(),
+            nn.Linear(h_dim, num_actions),
         )
         self.action_dim = num_actions
         self.obs_dim = obs_dim
@@ -83,7 +85,7 @@ class RecurrentDuelingDQN(NNBase):
         self.device = torch.device(device)
 
         self.apply(self.init_weights)
-        nn.init.constant_(self.a[-1].linear.weight, 0)
+        nn.init.constant_(self.a[-1].weight, 0)
         self.computes_grad(computes_grad)
         self.to(self.device)
         self.opt = self.configure_optimizer(0.01, lr)
