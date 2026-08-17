@@ -43,14 +43,14 @@ class Config:
     tau: float = 3e-2
     capacity: int = 1_000_000
     epoch: int = 10
-    noise: float = 1.
+    noise: float = 0.2
     min_noise: float = 0.02
     decay: float = 0.993
     burn_in: int = 10
     sequence_length: int = 20
-    batch_size: int = 32
-    max_grad_norm: float = 0.5
-    auxiliary_loss_weight: float = 5e-1
+    batch_size: int = 128
+    max_grad_norm: float = 5
+    auxiliary_loss_weight: float = 1
     observation_delta_scale: float = 50.
     learning_starts: int = 500
     evaluation_start: int = 100
@@ -370,7 +370,7 @@ def evaluate_agent(agent, env, episodes, seed):
 
 
 if __name__ == '__main__':
-    update = 1
+    update = 0
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     config = Config()
     torch.manual_seed(config.seed)
