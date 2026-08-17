@@ -24,6 +24,7 @@ from image_replaybuffer import ImageReplayBuffer
 
 
 OBSERVATION_SHAPE = (2, 96, 96)
+FRAME_SKIP = 2
 
 
 @dataclass
@@ -39,7 +40,27 @@ class Config:
     alpha: float = 0.1
 
 
+class FrameSkip(gym.Wrapper):
+    def __init__(self, env, skip=FRAME_SKIP):
+        super().__init__(env)
+        if not isinstance(skip, int) or skip < 1:
+            raise ValueError("skip must be a positive integer")
+        self.skip = skip
+
+    def step(self, action):
+        total_reward = 0.0
+        for _ in range(self.skip):
+            observation, reward, terminated, truncated, info = self.env.step(
+                action
+            )
+            total_reward += float(reward)
+            if terminated or truncated:
+                break
+        return observation, total_reward, terminated, truncated, info
+
+
 def wrap_carracing_observation(env):
+    env = FrameSkip(env, skip=FRAME_SKIP)
     env = gym.wrappers.GrayscaleObservation(env, keep_dim=False)
     return gym.wrappers.FrameStackObservation(env, stack_size=2)
 
