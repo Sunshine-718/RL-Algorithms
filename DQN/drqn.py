@@ -1,0 +1,375 @@
+from copy import deepcopy
+from dataclasses import dataclass
+
+import gymnasium as gym
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from tqdm.auto import tqdm
+
+from common import DQNAgentBase, NNBase, ResidualBlock, flush_episode
+from trajectorybuffer import TrajectoryBuffer
+
+
+CARTPOLE_OBSERVATION_INDICES = np.asarray([0, 2])
+
+
+def partial_cartpole_observation(observation):
+    observation = np.asarray(observation, dtype=np.float32)
+    return np.take(
+        observation, CARTPOLE_OBSERVATION_INDICES, axis=-1
+    )
+
+
+def make_partial_cartpole_env(render_mode=None):
+    env = gym.make('CartPole-v1', render_mode=render_mode)
+    source_space = env.observation_space
+    observation_space = gym.spaces.Box(
+        low=source_space.low[CARTPOLE_OBSERVATION_INDICES],
+        high=source_space.high[CARTPOLE_OBSERVATION_INDICES],
+        dtype=source_space.dtype,
+    )
+    return gym.wrappers.TransformObservation(
+        env, partial_cartpole_observation, observation_space
+    )
+
+
+@dataclass
+class Config:
+    discount: float = 0.99
+    params: str = './params'
+    tau: float = 3e-2
+    capacity: int = 1_000_000
+    epoch: int = 4
+    noise: float = 1.
+    min_noise: float = 0.05
+    decay: float = 0.995
+    burn_in: int = 10
+    sequence_length: int = 20
+    batch_size: int = 32
+    max_grad_norm: float = 0.5
+
+
+class RecurrentDuelingDQN(NNBase):
+    def __init__(self, lr, obs_dim, h_dim, recurrent_dim, num_actions,
+                 recurrent_layers=1, dropout=0., computes_grad=True,
+                 device='cpu'):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            ResidualBlock(obs_dim, h_dim, dropout),
+            ResidualBlock(h_dim, h_dim, dropout),
+        )
+        self.gru = nn.GRU(
+            h_dim,
+            recurrent_dim,
+            num_layers=recurrent_layers,
+            batch_first=True,
+            dropout=dropout if recurrent_layers > 1 else 0.,
+        )
+        self.v = nn.Sequential(
+            ResidualBlock(recurrent_dim, h_dim, dropout),
+            ResidualBlock(h_dim, 1),
+        )
+        self.a = nn.Sequential(
+            ResidualBlock(recurrent_dim, h_dim, dropout),
+            ResidualBlock(h_dim, num_actions),
+        )
+        self.action_dim = num_actions
+        self.obs_dim = obs_dim
+        self.recurrent_dim = recurrent_dim
+        self.recurrent_layers = recurrent_layers
+        self.device = torch.device(device)
+
+        self.apply(self.init_weights)
+        nn.init.constant_(self.a[-1].linear.weight, 0)
+        self.computes_grad(computes_grad)
+        self.to(self.device)
+        self.opt = self.configure_optimizer(0.01, lr)
+
+    def init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.orthogonal_(module.weight)
+        elif isinstance(module, nn.GRU):
+            for name, parameter in module.named_parameters():
+                if 'bias' in name:
+                    nn.init.constant_(parameter, 0)
+                elif 'weight_ih' in name:
+                    for gate in parameter.chunk(3, dim=0):
+                        nn.init.xavier_uniform_(gate)
+                elif 'weight_hh' in name:
+                    for gate in parameter.chunk(3, dim=0):
+                        nn.init.orthogonal_(gate)
+
+    def initial_hidden(self, batch_size):
+        return torch.zeros(
+            self.recurrent_layers,
+            batch_size,
+            self.recurrent_dim,
+            dtype=next(self.parameters()).dtype,
+            device=self.device,
+        )
+
+    def _as_sequence(self, state):
+        if state.dim() == 1:
+            state = state.reshape(1, 1, -1)
+        elif state.dim() == 2:
+            state = state.unsqueeze(1)
+        elif state.dim() != 3:
+            raise ValueError('state must have shape [O], [B, O] or [B, T, O]')
+        if state.shape[-1] != self.obs_dim:
+            raise ValueError(
+                f'expected observation size {self.obs_dim}, '
+                f'got {state.shape[-1]}'
+            )
+        return state
+
+    def forward(self, state, hidden=None):
+        state = self._as_sequence(state)
+        if hidden is None:
+            hidden = self.initial_hidden(state.shape[0])
+        feature = self.encoder(state)
+        self.gru.flatten_parameters()
+        feature, next_hidden = self.gru(feature, hidden)
+        value = self.v(feature)
+        advantage = self.a(feature)
+        q = value + advantage - advantage.mean(dim=-1, keepdim=True)
+        return q, next_hidden
+
+    def burn_in(self, observation, valid, hidden=None):
+        observation = self._as_sequence(observation)
+        if valid.dim() == 3 and valid.shape[-1] == 1:
+            valid = valid.squeeze(-1)
+        if valid.shape != observation.shape[:2]:
+            raise ValueError('burn-in mask does not match observations')
+        if hidden is None:
+            hidden = self.initial_hidden(observation.shape[0])
+
+        feature = self.encoder(observation)
+        for time_idx in range(observation.shape[1]):
+            _, candidate_hidden = self.gru(
+                feature[:, time_idx:time_idx + 1], hidden
+            )
+            mask = valid[:, time_idx].reshape(1, -1, 1)
+            hidden = torch.where(mask, candidate_hidden, hidden)
+        return hidden
+
+
+class DRQNAgent(DQNAgentBase):
+    def __init__(self, name, Q, config):
+        self.net = Q
+        self.target_net = deepcopy(Q)
+        self.target_net.computes_grad(False)
+        self.buffer = TrajectoryBuffer(
+            Q.obs_dim, config.capacity, 1, Q.device
+        )
+
+        self.name = name
+        self.n_actions = Q.action_dim
+        self.params = config.params
+        self.discount = config.discount
+        self.epoch = config.epoch
+        self.tau = config.tau
+        self.noise = config.noise
+        self.min_noise = config.min_noise
+        self.decay = config.decay
+        self.burn_in = config.burn_in
+        self.sequence_length = config.sequence_length
+        self.batch_size = config.batch_size
+        self.max_grad_norm = config.max_grad_norm
+        self._n_step = 1
+        self._action_hidden = None
+        self.soft_update(tau=1)
+        self.reset_hidden()
+
+    @property
+    def n_step(self):
+        return 1
+
+    @n_step.setter
+    def n_step(self, value):
+        if value != 1:
+            raise ValueError('DRQN currently supports one-step TD targets only')
+
+    def reset_hidden(self, done=None, batch_size=1):
+        if done is None:
+            self._action_hidden = self.net.initial_hidden(batch_size)
+            return self._action_hidden
+
+        done = torch.as_tensor(
+            done, dtype=torch.bool, device=self.net.device
+        ).reshape(-1)
+        if (
+            self._action_hidden is None
+            or self._action_hidden.shape[1] != len(done)
+        ):
+            self._action_hidden = self.net.initial_hidden(len(done))
+        else:
+            self._action_hidden = self._action_hidden.clone()
+            self._action_hidden[:, done] = 0
+        return self._action_hidden
+
+    @torch.no_grad()
+    def action(self, state, deterministic=False):
+        state = np.asarray(state, dtype=np.float32)
+        single_state = state.ndim == 1
+        if single_state:
+            state = np.expand_dims(state, axis=0)
+        if state.ndim != 2:
+            raise ValueError('state must have shape [O] or [B, O]')
+
+        state = torch.from_numpy(state).to(self.net.device)
+        if (
+            self._action_hidden is None
+            or self._action_hidden.shape[1] != len(state)
+        ):
+            self.reset_hidden(batch_size=len(state))
+
+        was_training = self.net.training
+        self.net.eval()
+        q, self._action_hidden = self.net(state, self._action_hidden)
+        self._action_hidden = self._action_hidden.detach()
+        if was_training:
+            self.net.train()
+
+        greedy_actions = q[:, -1].argmax(dim=-1).cpu().numpy()
+        if deterministic:
+            actions = greedy_actions
+        else:
+            explore = np.random.random(len(greedy_actions)) < self.noise
+            random_actions = np.random.randint(
+                0, self.n_actions, size=len(greedy_actions)
+            )
+            actions = np.where(explore, random_actions, greedy_actions)
+        return int(actions[0]) if single_state else actions
+
+    def td_target(self, reward, next_q, terminated):
+        return reward + self.discount * next_q * (~terminated).float()
+
+    def loss(self, burn_observation, burn_mask, observation, action,
+             reward, terminated, truncated, loss_mask):
+        del truncated
+        with torch.no_grad():
+            online_hidden = self.net.burn_in(
+                burn_observation, burn_mask
+            )
+            target_hidden = self.target_net.burn_in(
+                burn_observation, burn_mask
+            )
+
+        q, _ = self.net(observation, online_hidden.detach())
+        current_q = q[:, :-1].gather(-1, action.long())
+
+        with torch.no_grad():
+            target_q, _ = self.target_net(
+                observation, target_hidden.detach()
+            )
+            next_action = q[:, 1:].detach().argmax(
+                dim=-1, keepdim=True
+            )
+            next_q = target_q[:, 1:].gather(-1, next_action)
+            target = self.td_target(reward, next_q, terminated)
+
+        elementwise_loss = F.smooth_l1_loss(
+            current_q, target, reduction='none'
+        )
+        loss_mask = loss_mask.float()
+        return (
+            (elementwise_loss * loss_mask).sum()
+            / loss_mask.sum().clamp_min(1.)
+        )
+
+    def step(self, batch_size=None):
+        batch_size = self.batch_size if batch_size is None else batch_size
+        loss = None
+        if self.buffer.can_sample(batch_size):
+            for _ in range(self.epoch):
+                self.net.opt.zero_grad()
+                self.target_net.eval()
+                self.net.train()
+                loss = self.loss(*self.buffer.sample(
+                    batch_size, self.burn_in, self.sequence_length
+                ))
+                loss.backward()
+                nn.utils.clip_grad_norm_(
+                    self.net.parameters(), self.max_grad_norm
+                )
+                self.net.opt.step()
+                self.soft_update()
+            self.decay_noise()
+        return loss.item() if loss is not None else None
+
+
+if __name__ == '__main__':
+    update = 1
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    env = make_partial_cartpole_env(
+        render_mode=None if bool(update) else 'human'
+    )
+    config = Config()
+    Q = RecurrentDuelingDQN(
+        lr=1e-3,
+        obs_dim=env.observation_space.shape[0],
+        h_dim=128,
+        recurrent_dim=128,
+        num_actions=env.action_space.n,
+        recurrent_layers=1,
+        device=device,
+    )
+    agent = DRQNAgent('cartpole_drqn', Q, config)
+    if not bool(update):
+        agent.load()
+
+    total_episodes = 2000 if bool(update) else 10
+    reward_container = []
+    loss_container = []
+    best_avg = -float('inf')
+    iterator = tqdm(range(total_episodes))
+
+    for episode in iterator:
+        state, _ = env.reset()
+        agent.reset_hidden()
+        episode_cache = []
+        episode_reward = 0.
+        done = False
+
+        while not done:
+            action = agent.action(state, deterministic=not bool(update))
+            next_state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            if bool(update):
+                episode_cache.append((
+                    state.copy(), action, reward, next_state.copy(),
+                    terminated, truncated,
+                ))
+            state = next_state
+            episode_reward += reward
+
+        if bool(update):
+            flush_episode(agent, episode_cache)
+            loss = agent.step()
+            if loss is not None:
+                loss_container.append(loss)
+
+        reward_container.append(episode_reward)
+        average_reward = float(np.mean(reward_container[-10:]))
+        if bool(update) and average_reward > best_avg:
+            best_avg = average_reward
+            agent.save('best')
+        iterator.set_description(
+            f'episode reward: {episode_reward: .0f}, '
+            f'avg: {average_reward: .1f}, noise: {agent.noise: .3f}'
+        )
+
+    if bool(update):
+        agent.save()
+    env.close()
+
+    plt.plot(reward_container, label='Reward')
+    plt.xlabel('Episode')
+    plt.ylabel('Reward')
+    plt.grid()
+    plt.legend()
+    plt.tight_layout()
+    plt.show()

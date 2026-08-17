@@ -6,6 +6,7 @@
 
 ### 1. DQN (Deep Q-Network) 系列
 - DQN (Deep Q-Network)
+- DRQN (GRU + Trajectory Replay，CartPole 部分可观测版本)
 - IQN (Implicit Quantile Networks)
 - QR-DQN (Quantile Regression DQN)
 - Soft DQN variants
@@ -58,6 +59,9 @@ pip install -r requirements.txt
 ```python
 # 示例：运行DQN
 python DQN/dqn.py
+
+# 运行只观察位置与杆角度的 CartPole DRQN
+python DQN/drqn.py
 ```
 
 可键盘控制的 BipedalWalker 训练与操作说明见
