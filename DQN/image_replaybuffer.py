@@ -6,7 +6,7 @@ class ImageReplayBuffer:
     """Replay buffer that stores image observations as uint8 on the CPU."""
 
     def __init__(self, observation_shape, capacity, action_dim, discount,
-                 n_step=1, device="cpu"):
+                 n_step=1, device="cpu", action_dtype=np.int64):
         self.observation_shape = tuple(observation_shape)
         if not self.observation_shape:
             raise ValueError("observation_shape must not be empty")
@@ -21,7 +21,15 @@ class ImageReplayBuffer:
             (capacity, *self.observation_shape), dtype=np.uint8
         )
         self.next_state = np.empty_like(self.state)
-        self.action = np.empty((capacity, action_dim), dtype=np.int64)
+        self.action_dtype = np.dtype(action_dtype)
+        if not (
+            np.issubdtype(self.action_dtype, np.integer)
+            or np.issubdtype(self.action_dtype, np.floating)
+        ):
+            raise TypeError("action_dtype must be an integer or float dtype")
+        self.action = np.empty(
+            (capacity, action_dim), dtype=self.action_dtype
+        )
         self.reward = np.empty((capacity, 1), dtype=np.float32)
         self.terminated = np.empty((capacity, 1), dtype=np.bool_)
         self.truncated = np.empty_like(self.terminated)
@@ -80,7 +88,7 @@ class ImageReplayBuffer:
         self.state[index] = self._as_uint8_image(state)
         self.next_state[index] = self._as_uint8_image(next_state)
 
-        action_array = np.asarray(action, dtype=np.int64).reshape(-1)
+        action_array = np.asarray(action, dtype=self.action_dtype).reshape(-1)
         if action_array.size != self.action.shape[1]:
             raise ValueError(
                 f"expected {self.action.shape[1]} action values, "
