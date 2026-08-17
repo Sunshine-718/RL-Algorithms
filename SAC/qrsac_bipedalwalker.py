@@ -22,7 +22,7 @@ class Config:
     discount: float = 0.99
     params: str = './params'
     tau: float = 3e-2
-    capacity: int = 1_000_000
+    capacity: int = 10_000_000
     epoch: int = 10
     reward_scale: float = 5
     n_step: int = 5
@@ -192,7 +192,7 @@ if __name__ == "__main__":
     config = Config()
     agent = ContinuousSACAgent('qrsac_bipedalwalker', ac, config)
     # agent.load()
-    agent.n_step = 10
+    agent.n_step = 20
     reward_container = []
     Loss = []
     td_error = []
