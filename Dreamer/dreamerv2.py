@@ -65,17 +65,6 @@ class Config:
     seed: int = 0
 
 
-def mlp(in_dim, hidden_dim, out_dim, layers=2):
-    modules = []
-    for _ in range(layers):
-        modules.extend(
-            [nn.Linear(in_dim, hidden_dim), nn.ELU(inplace=True)]
-        )
-        in_dim = hidden_dim
-    modules.append(nn.Linear(in_dim, out_dim))
-    return nn.Sequential(*modules)
-
-
 def detach_state(state):
     return {key: value.detach() for key, value in state.items()}
 
@@ -171,12 +160,15 @@ class RSSM(nn.Module):
             nn.ELU(inplace=True),
         )
         self.gru = nn.GRUCell(hidden_dim, deter_dim)
-        self.prior = mlp(deter_dim, hidden_dim, self.stoch_size, layers=1)
-        self.posterior = mlp(
-            deter_dim + embed_dim,
-            hidden_dim,
-            self.stoch_size,
-            layers=1,
+        self.prior = nn.Sequential(
+            nn.Linear(deter_dim, hidden_dim),
+            nn.ELU(inplace=True),
+            nn.Linear(hidden_dim, self.stoch_size),
+        )
+        self.posterior = nn.Sequential(
+            nn.Linear(deter_dim + embed_dim, hidden_dim),
+            nn.ELU(inplace=True),
+            nn.Linear(hidden_dim, self.stoch_size),
         )
 
     @property
@@ -290,8 +282,20 @@ class WorldModel(nn.Module):
         )
         feature_dim = self.rssm.feature_dim
         self.decoder = ImageDecoder(feature_dim, config.cnn_depth)
-        self.reward = mlp(feature_dim, config.hidden_dim, 1)
-        self.continue_head = mlp(feature_dim, config.hidden_dim, 1)
+        self.reward = nn.Sequential(
+            nn.Linear(feature_dim, config.hidden_dim),
+            nn.ELU(inplace=True),
+            nn.Linear(config.hidden_dim, config.hidden_dim),
+            nn.ELU(inplace=True),
+            nn.Linear(config.hidden_dim, 1),
+        )
+        self.continue_head = nn.Sequential(
+            nn.Linear(feature_dim, config.hidden_dim),
+            nn.ELU(inplace=True),
+            nn.Linear(config.hidden_dim, config.hidden_dim),
+            nn.ELU(inplace=True),
+            nn.Linear(config.hidden_dim, 1),
+        )
 
     def loss(self, batch):
         observation = batch["observation"]
@@ -373,7 +377,15 @@ class Actor(nn.Module):
         self.discrete = bool(discrete)
         self.action_dim = action_dim
         output_dim = action_dim if discrete else action_dim * 2
-        self.network = mlp(feature_dim, hidden_dim, output_dim, layers=3)
+        self.network = nn.Sequential(
+            nn.Linear(feature_dim, hidden_dim),
+            nn.ELU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ELU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ELU(inplace=True),
+            nn.Linear(hidden_dim, output_dim),
+        )
 
     def sample(self, feature, deterministic=False):
         output = self.network(feature)
@@ -407,7 +419,15 @@ class Actor(nn.Module):
 class Critic(nn.Module):
     def __init__(self, feature_dim, hidden_dim=400):
         super().__init__()
-        self.network = mlp(feature_dim, hidden_dim, 1, layers=3)
+        self.network = nn.Sequential(
+            nn.Linear(feature_dim, hidden_dim),
+            nn.ELU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ELU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ELU(inplace=True),
+            nn.Linear(hidden_dim, 1),
+        )
 
     def forward(self, feature):
         return self.network(feature)
