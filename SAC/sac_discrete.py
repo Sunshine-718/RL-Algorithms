@@ -93,7 +93,7 @@ class DiscreteSACAgent(AgentBase):
         self._n_step = config.n_step
         self.tau = config.tau
         self.critic_update_factor = config.critic_update_factor
-        self.target_entropy = math.log(self.n_actions) * 0.8
+        self.target_entropy = math.log(self.n_actions) * 0.45
         self.soft_update(tau=1)
 
     @torch.no_grad()

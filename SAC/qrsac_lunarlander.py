@@ -135,7 +135,7 @@ class DiscreteSACAgent(AgentBase):
         self._n_step = config.n_step
         self.tau = config.tau
         self.critic_update_factor = config.critic_update_factor
-        self.target_entropy = math.log(self.n_actions) * 0.8
+        self.target_entropy = math.log(self.n_actions) * 0.45
         self.qr_tau = torch.linspace(0.5 / self.net.num_quantiles, 1 - 0.5 / self.net.num_quantiles,
                                      self.net.num_quantiles).to(ac.device).view(1, -1)
         self.soft_update(tau=1)
