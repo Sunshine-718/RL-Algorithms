@@ -917,7 +917,7 @@
           </nav>
           <div class="code-main">
             <div class="code-toolbar">
-              <span id="code-file">Dreamer/dreamerv2.py · RSSM._sample</span>
+              <span id="code-file">Dreamer/world_model.py · RSSM._sample</span>
               <button class="copy-button" type="button" id="copy-code">复制代码</button>
             </div>
             <pre aria-live="polite"><code id="code-view"></code></pre>
@@ -1150,7 +1150,7 @@ class Config:
   <script>
     const codeMeta = {
       config: {
-        file: "Dreamer/dreamerv2.py · Config",
+        file: "Dreamer/config.py · Config",
         title: "集中管理训练规模",
         text: "数据量、模型尺寸、KL、想象长度和优化器参数都集中在 dataclass 中，保持与仓库其他算法一致的入口风格。",
         list: ["sequence_length 控制真实序列长度。", "imagination_horizon 控制模型内滚动长度。", "continuous 布尔值位于训练入口。"],
@@ -1164,21 +1164,21 @@ class Config:
         source: "SequenceReplayBuffer.sample()"
       },
       rssm: {
-        file: "Dreamer/dreamerv2.py · RSSM._sample",
+        file: "Dreamer/world_model.py · RSSM._sample",
         title: "直通离散采样",
         text: "前向使用 one-hot，反向把梯度交给类别概率。该状态随后与 GRU 确定状态拼接成模型特征。",
         list: ["sample=True：训练时随机采样。", "sample=False：评估时选择最大概率类别。", "每个随机变量有 stoch_classes 个类别。"],
         source: "RSSM._sample()"
       },
       world: {
-        file: "Dreamer/dreamerv2.py · WorldModel._kl_loss",
+        file: "Dreamer/world_model.py · WorldModel._kl_loss",
         title: "KL balance",
         text: "停止不同一侧的梯度，可以分别控制后验正则与先验拟合。默认 0.8 权重用于训练先验。",
         list: ["posterior_kl 只更新后验。", "prior_kl 只更新先验。", "free_nats 避免过度压缩潜状态。"],
         source: "WorldModel._kl_loss()"
       },
       agent: {
-        file: "Dreamer/dreamerv2.py · DreamerV2Agent._imagine",
+        file: "Dreamer/agent.py · DreamerV2Agent._imagine",
         title: "从后验状态开始想象",
         text: "想象阶段不再编码真实图像。Actor 给动作，RSSM 先验生成下一状态，预测头给奖励与继续概率。",
         list: ["feature 长度为 H+1。", "奖励和折扣长度为 H。", "λ-return 对齐当前动作。"],

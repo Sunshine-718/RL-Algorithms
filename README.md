@@ -74,6 +74,9 @@ python Dreamer/dreamerv2.py
 完整原理、数据流和源码导读见
 [`Dreamer/dreamerv2_tutorial.html`](Dreamer/dreamerv2_tutorial.html)。
 
+Dreamer V2 按职责分为 `config.py`、`world_model.py`、`behavior.py`、
+`agent.py`、`replaybuffer.py` 和运行入口 `dreamerv2.py`。
+
 可键盘控制的 BipedalWalker 训练与操作说明见
 [`SAC/COMMAND_BIPEDAL.md`](SAC/COMMAND_BIPEDAL.md)。
 

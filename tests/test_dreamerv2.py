@@ -4,11 +4,9 @@ import unittest
 import numpy as np
 import torch
 
-from Dreamer.dreamerv2 import (
-    Config,
-    DreamerV2Agent,
-    make_carracing_env,
-)
+from Dreamer.agent import DreamerV2Agent
+from Dreamer.config import Config
+from Dreamer.dreamerv2 import make_carracing_env
 from Dreamer.replaybuffer import SequenceReplayBuffer, as_chw_uint8
 
 
