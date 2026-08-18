@@ -858,9 +858,9 @@
           <div class="formula-panel">
             <h3>世界模型损失</h3>
             <div class="loss-row">
-              <div class="loss cyan">L_recon<br>图像 MSE</div>
+              <div class="loss cyan">L_recon<br>图像 0.5 × SSE</div>
               <span>+</span>
-              <div class="loss green">L_reward<br>奖励 MSE</div>
+              <div class="loss green">L_reward<br>奖励 0.5 × SE</div>
               <span>+</span>
               <div class="loss green">L_continue<br>二元交叉熵</div>
               <span>+</span>
@@ -887,9 +887,9 @@
             </ul>
           </article>
           <article class="compare-column">
-            <h3>连续动作：tanh-Normal + dynamics gradient</h3>
+            <h3>连续动作：Truncated Normal + dynamics gradient</h3>
             <ul>
-              <li>重参数采样后经 tanh 限制到 <code>[-1, 1]</code>。</li>
+              <li>均值经 tanh 限制，随后在 <code>[-1,1]</code> 内重参数采样。</li>
               <li>回报梯度穿过冻结的世界模型回到 Actor。</li>
               <li>熵系数默认 <code>1e-4</code>。</li>
             </ul>
@@ -951,7 +951,7 @@
             <li><span class="step-number">3</span><strong>从后验状态出发</strong><p>把 <span class="shape">[B,T,…]</span> 展平；排除真正终止状态。</p></li>
             <li><span class="step-number">4</span><strong>生成想象轨迹</strong><p>Actor 与 RSSM 先验滚动 <span class="shape">H=15</span> 步。</p></li>
             <li><span class="step-number">5</span><strong>更新 Actor</strong><p>离散动作使用 REINFORCE；连续动作使用 dynamics gradient。</p></li>
-            <li><span class="step-number">6</span><strong>更新 Critic</strong><p>拟合停止梯度的 λ-return；每 100 次更新同步目标 Critic。</p></li>
+            <li><span class="step-number">6</span><strong>更新 Critic</strong><p>拟合停止梯度的 λ-return；首次更新后同步目标 Critic，之后每 100 次同步。</p></li>
           </ol>
 
           <div class="run-panel">

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-from torch.optim import NAdam
+from torch.optim import Adam
 
 from Dreamer.behavior import Actor, Critic, lambda_return
 from Dreamer.config import Config
@@ -63,12 +63,23 @@ class DreamerV2Agent:
         for parameter in self.target_critic.parameters():
             parameter.requires_grad_(False)
 
-        self.model_opt = NAdam(
-            self.world_model.parameters(), lr=self.config.model_lr
+        self.model_opt = Adam(
+            self.world_model.parameters(),
+            lr=self.config.model_lr,
+            eps=self.config.adam_eps,
+            weight_decay=self.config.weight_decay,
         )
-        self.actor_opt = NAdam(self.actor.parameters(), lr=self.config.actor_lr)
-        self.critic_opt = NAdam(
-            self.critic.parameters(), lr=self.config.critic_lr
+        self.actor_opt = Adam(
+            self.actor.parameters(),
+            lr=self.config.actor_lr,
+            eps=self.config.adam_eps,
+            weight_decay=self.config.weight_decay,
+        )
+        self.critic_opt = Adam(
+            self.critic.parameters(),
+            lr=self.config.critic_lr,
+            eps=self.config.adam_eps,
+            weight_decay=self.config.weight_decay,
         )
         self.buffer = SequenceReplayBuffer(
             self.config.capacity,
@@ -160,9 +171,9 @@ class DreamerV2Agent:
         behavior_metrics = self._train_behavior(flat_state)
         metrics.update(behavior_metrics)
         metrics["model_grad_norm"] = torch.as_tensor(model_grad).detach()
-        self.updates += 1
         if self.updates % self.config.slow_target_update == 0:
             self.target_critic.load_state_dict(self.critic.state_dict())
+        self.updates += 1
         return {key: float(value.item()) for key, value in metrics.items()}
 
     def _train_behavior(self, start):

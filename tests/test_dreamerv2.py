@@ -5,6 +5,7 @@ import numpy as np
 import torch
 
 from Dreamer.agent import DreamerV2Agent
+from Dreamer.behavior import Actor
 from Dreamer.config import Config
 from Dreamer.dreamerv2 import make_carracing_env
 from Dreamer.replaybuffer import SequenceReplayBuffer, as_chw_uint8
@@ -19,6 +20,7 @@ def tiny_config(params=None):
         deter_dim=16,
         stoch_dim=4,
         stoch_classes=4,
+        rssm_hidden_dim=32,
         hidden_dim=32,
         cnn_depth=4,
         free_nats=0.0,
@@ -116,6 +118,14 @@ class DreamerV2AgentTest(unittest.TestCase):
         metrics = agent.step()
         self.assertIsNotNone(metrics)
         self.assertTrue(all(np.isfinite(value) for value in metrics.values()))
+        self.assertGreater(metrics["reconstruction_loss"], 1.0)
+        if not discrete:
+            self.assertGreater(metrics["actor_grad_norm"], 0.0)
+        self.assertIsInstance(agent.model_opt, torch.optim.Adam)
+        for critic, target in zip(
+            agent.critic.parameters(), agent.target_critic.parameters()
+        ):
+            torch.testing.assert_close(critic, target)
         observation = rng.integers(0, 256, (2, 96, 96), dtype=np.uint8)
         action = agent.action(observation, deterministic=True)
         if discrete:
@@ -130,6 +140,16 @@ class DreamerV2AgentTest(unittest.TestCase):
     def test_discrete_and_continuous_training_steps(self):
         self._fill_and_step(discrete=True)
         self._fill_and_step(discrete=False)
+
+    def test_continuous_actor_is_bounded_and_reparameterized(self):
+        actor = Actor(6, 3, discrete=False, hidden_dim=8)
+        feature = torch.randn(4, 6, requires_grad=True)
+        output = actor.sample(feature)
+        self.assertTrue(torch.all(output["action"] > -1.0))
+        self.assertTrue(torch.all(output["action"] < 1.0))
+        (output["action"].sum() + output["entropy"].sum()).backward()
+        self.assertTrue(torch.isfinite(feature.grad).all())
+        self.assertGreater(float(feature.grad.abs().sum()), 0.0)
 
     def test_checkpoint_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:

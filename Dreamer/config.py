@@ -29,8 +29,11 @@ class Config:
     deter_dim: int = 200
     stoch_dim: int = 32
     stoch_classes: int = 32
+    rssm_hidden_dim: int = 200
     hidden_dim: int = 400
-    cnn_depth: int = 32
+    cnn_depth: int = 48
+    adam_eps: float = 1e-5
+    weight_decay: float = 1e-6
     params: str = "./params"
     eval_episodes: int = 3
     seed: int = 0

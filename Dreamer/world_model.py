@@ -13,6 +13,22 @@ def stack_states(states):
     }
 
 
+class DreamerGRUCell(nn.Module):
+    def __init__(self, input_dim, deter_dim):
+        super().__init__()
+        self.linear = nn.Linear(input_dim + deter_dim, 3 * deter_dim)
+        self.norm = nn.LayerNorm(3 * deter_dim, eps=1e-3)
+
+    def forward(self, inputs, state):
+        reset, candidate, update = self.norm(
+            self.linear(torch.cat([inputs, state], dim=-1))
+        ).chunk(3, dim=-1)
+        reset = torch.sigmoid(reset)
+        candidate = torch.tanh(reset * candidate)
+        update = torch.sigmoid(update - 1.0)
+        return update * candidate + (1.0 - update) * state
+
+
 class ImageEncoder(nn.Module):
     def __init__(self, depth=32):
         super().__init__()
@@ -81,7 +97,7 @@ class RSSM(nn.Module):
             nn.Linear(self.stoch_size + action_dim, hidden_dim),
             nn.SiLU(inplace=True),
         )
-        self.gru = nn.GRUCell(hidden_dim, deter_dim)
+        self.gru = DreamerGRUCell(hidden_dim, deter_dim)
         self.prior = nn.Sequential(
             nn.Linear(deter_dim, hidden_dim),
             nn.SiLU(inplace=True),
@@ -200,7 +216,7 @@ class WorldModel(nn.Module):
             config.deter_dim,
             config.stoch_dim,
             config.stoch_classes,
-            config.hidden_dim,
+            config.rssm_hidden_dim,
         )
         feature_dim = self.rssm.feature_dim
         self.decoder = ImageDecoder(feature_dim, config.cnn_depth)
@@ -209,10 +225,18 @@ class WorldModel(nn.Module):
             nn.SiLU(inplace=True),
             nn.Linear(config.hidden_dim, config.hidden_dim),
             nn.SiLU(inplace=True),
+            nn.Linear(config.hidden_dim, config.hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(config.hidden_dim, config.hidden_dim),
+            nn.SiLU(inplace=True),
             nn.Linear(config.hidden_dim, 1),
         )
         self.continue_head = nn.Sequential(
             nn.Linear(feature_dim, config.hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(config.hidden_dim, config.hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(config.hidden_dim, config.hidden_dim),
             nn.SiLU(inplace=True),
             nn.Linear(config.hidden_dim, config.hidden_dim),
             nn.SiLU(inplace=True),
@@ -232,9 +256,16 @@ class WorldModel(nn.Module):
         transition_mask = 1.0 - batch["is_first"]
         denominator = transition_mask.sum().clamp_min(1.0)
 
-        reconstruction_loss = F.mse_loss(reconstruction, observation)
+        reconstruction_loss = (
+            0.5
+            * (reconstruction - observation)
+            .square()
+            .sum(dim=(-3, -2, -1))
+        ).mean()
         reward_loss = (
-            (reward - batch["reward"]).pow(2) * transition_mask
+            0.5
+            * (reward - batch["reward"]).pow(2)
+            * transition_mask
         ).sum() / denominator
         continue_loss = (
             F.binary_cross_entropy_with_logits(

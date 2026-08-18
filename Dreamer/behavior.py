@@ -1,7 +1,51 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical, Normal
+
+
+class TruncatedNormal:
+    def __init__(self, mean, std, low=-1.0, high=1.0):
+        self.mean = mean
+        self.std = std
+        self.low = torch.as_tensor(low, dtype=mean.dtype, device=mean.device)
+        self.high = torch.as_tensor(
+            high, dtype=mean.dtype, device=mean.device
+        )
+        self.normal = Normal(mean, std)
+        self.low_cdf = self.normal.cdf(self.low)
+        self.high_cdf = self.normal.cdf(self.high)
+        self.normalizer = (self.high_cdf - self.low_cdf).clamp_min(1e-6)
+
+    def rsample(self):
+        probability = self.low_cdf + torch.rand_like(self.mean) * self.normalizer
+        sample = self.normal.icdf(probability.clamp(1e-6, 1.0 - 1e-6))
+        clipped = sample.clamp(self.low + 1e-6, self.high - 1e-6)
+        return sample + (clipped - sample).detach()
+
+    def log_prob(self, value):
+        return self.normal.log_prob(value) - self.normalizer.log()
+
+    def entropy(self):
+        alpha = (self.low - self.mean) / self.std
+        beta = (self.high - self.mean) / self.std
+        alpha_pdf = torch.exp(-0.5 * alpha.square()) / math.sqrt(
+            2.0 * math.pi
+        )
+        beta_pdf = torch.exp(-0.5 * beta.square()) / math.sqrt(
+            2.0 * math.pi
+        )
+        correction = (
+            alpha * alpha_pdf - beta * beta_pdf
+        ) / (2.0 * self.normalizer)
+        return (
+            self.std.log()
+            + self.normalizer.log()
+            + 0.5 * math.log(2.0 * math.pi * math.e)
+            + correction
+        )
 
 
 class Actor(nn.Module):
@@ -12,6 +56,8 @@ class Actor(nn.Module):
         output_dim = action_dim if discrete else action_dim * 2
         self.network = nn.Sequential(
             nn.Linear(feature_dim, hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(inplace=True),
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(inplace=True),
@@ -34,13 +80,11 @@ class Actor(nn.Module):
             }
 
         mean, raw_std = output.chunk(2, dim=-1)
-        mean = 5.0 * torch.tanh(mean / 5.0)
+        mean = torch.tanh(mean)
         std = 2.0 * torch.sigmoid(raw_std / 2.0) + 0.1
-        distribution = Normal(mean, std)
-        raw_action = mean if deterministic else distribution.rsample()
-        action = torch.tanh(raw_action)
-        log_prob = distribution.log_prob(raw_action)
-        log_prob -= torch.log(1.0 - action.pow(2) + 1e-6)
+        distribution = TruncatedNormal(mean, std)
+        action = mean if deterministic else distribution.rsample()
+        log_prob = distribution.log_prob(action)
         return {
             "action": action,
             "index": None,
@@ -54,6 +98,8 @@ class Critic(nn.Module):
         super().__init__()
         self.network = nn.Sequential(
             nn.Linear(feature_dim, hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(inplace=True),
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(inplace=True),
