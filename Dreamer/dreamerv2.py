@@ -97,13 +97,13 @@ class ImageEncoder(nn.Module):
         channels = OBSERVATION_SHAPE[0]
         self.network = nn.Sequential(
             nn.Conv2d(channels, depth, 4, 2, 1),
-            nn.ELU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Conv2d(depth, depth * 2, 4, 2, 1),
-            nn.ELU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Conv2d(depth * 2, depth * 4, 4, 2, 1),
-            nn.ELU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Conv2d(depth * 4, depth * 8, 4, 2, 1),
-            nn.ELU(inplace=True),
+            nn.SiLU(inplace=True),
         )
         self.output_dim = depth * 8 * 6 * 6
 
@@ -122,11 +122,11 @@ class ImageDecoder(nn.Module):
         self.input = nn.Linear(feature_dim, depth * 8 * 6 * 6)
         self.network = nn.Sequential(
             nn.ConvTranspose2d(depth * 8, depth * 4, 4, 2, 1),
-            nn.ELU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.ConvTranspose2d(depth * 4, depth * 2, 4, 2, 1),
-            nn.ELU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.ConvTranspose2d(depth * 2, depth, 4, 2, 1),
-            nn.ELU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.ConvTranspose2d(depth, channels, 4, 2, 1),
         )
 
@@ -157,17 +157,17 @@ class RSSM(nn.Module):
         self.stoch_size = stoch_dim * stoch_classes
         self.img_in = nn.Sequential(
             nn.Linear(self.stoch_size + action_dim, hidden_dim),
-            nn.ELU(inplace=True),
+            nn.SiLU(inplace=True),
         )
         self.gru = nn.GRUCell(hidden_dim, deter_dim)
         self.prior = nn.Sequential(
             nn.Linear(deter_dim, hidden_dim),
-            nn.ELU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Linear(hidden_dim, self.stoch_size),
         )
         self.posterior = nn.Sequential(
             nn.Linear(deter_dim + embed_dim, hidden_dim),
-            nn.ELU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Linear(hidden_dim, self.stoch_size),
         )
 
@@ -284,16 +284,16 @@ class WorldModel(nn.Module):
         self.decoder = ImageDecoder(feature_dim, config.cnn_depth)
         self.reward = nn.Sequential(
             nn.Linear(feature_dim, config.hidden_dim),
-            nn.ELU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Linear(config.hidden_dim, config.hidden_dim),
-            nn.ELU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Linear(config.hidden_dim, 1),
         )
         self.continue_head = nn.Sequential(
             nn.Linear(feature_dim, config.hidden_dim),
-            nn.ELU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Linear(config.hidden_dim, config.hidden_dim),
-            nn.ELU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Linear(config.hidden_dim, 1),
         )
 
@@ -379,11 +379,11 @@ class Actor(nn.Module):
         output_dim = action_dim if discrete else action_dim * 2
         self.network = nn.Sequential(
             nn.Linear(feature_dim, hidden_dim),
-            nn.ELU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ELU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ELU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Linear(hidden_dim, output_dim),
         )
 
@@ -421,11 +421,11 @@ class Critic(nn.Module):
         super().__init__()
         self.network = nn.Sequential(
             nn.Linear(feature_dim, hidden_dim),
-            nn.ELU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ELU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ELU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Linear(hidden_dim, 1),
         )
 
