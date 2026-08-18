@@ -1,0 +1,1273 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="结合本仓库 PyTorch 源码讲解 Dreamer V2 的世界模型、潜空间想象与 Actor-Critic 训练。">
+  <title>Dreamer V2 原理与代码</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #020d19;
+      --bg-deep: #010914;
+      --surface: #071827;
+      --surface-2: #0a2032;
+      --surface-3: #0d263b;
+      --text: #eef6ff;
+      --muted: #9db1c5;
+      --faint: #6d8296;
+      --line: #1b3a53;
+      --line-strong: #285171;
+      --cyan: #55ccf6;
+      --cyan-soft: #153e51;
+      --amber: #f2b53a;
+      --amber-soft: #3c3014;
+      --violet: #a679ef;
+      --violet-soft: #2e2250;
+      --blue: #5595ff;
+      --blue-soft: #142e5a;
+      --green: #83ce54;
+      --green-soft: #203b1b;
+      --danger: #ff7c86;
+      --radius: 12px;
+      --max: 1440px;
+      --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 15% 0%, rgba(25, 87, 124, .17), transparent 28rem),
+        linear-gradient(180deg, var(--bg-deep), var(--bg) 34rem);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 16px;
+      line-height: 1.72;
+    }
+
+    button, a { font: inherit; }
+    a { color: var(--cyan); text-decoration: none; }
+    a:hover { color: #8ee4ff; }
+    button { color: inherit; }
+    :focus-visible {
+      outline: 2px solid var(--cyan);
+      outline-offset: 3px;
+    }
+
+    .skip-link {
+      position: fixed;
+      left: 1rem;
+      top: -5rem;
+      z-index: 100;
+      padding: .7rem 1rem;
+      border-radius: 8px;
+      background: var(--cyan);
+      color: #00101d;
+      font-weight: 750;
+    }
+    .skip-link:focus { top: 1rem; }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      border-bottom: 1px solid rgba(40, 81, 113, .62);
+      background: rgba(2, 13, 25, .92);
+      backdrop-filter: blur(18px);
+    }
+    .topbar-inner {
+      max-width: var(--max);
+      min-height: 66px;
+      margin: 0 auto;
+      padding: 0 32px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 32px;
+    }
+    .brand {
+      color: var(--text);
+      font-size: 20px;
+      font-weight: 760;
+      letter-spacing: -.02em;
+      white-space: nowrap;
+    }
+    .brand span { color: var(--muted); font-weight: 520; }
+    .topnav { display: flex; align-items: stretch; gap: 34px; }
+    .topnav a {
+      position: relative;
+      padding: 20px 2px 18px;
+      color: #b8c6d5;
+      font-size: 15px;
+      font-weight: 650;
+    }
+    .topnav a::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: -1px;
+      height: 2px;
+      background: var(--cyan);
+      transform: scaleX(0);
+      transition: transform .2s ease;
+    }
+    .topnav a:hover, .topnav a.active { color: var(--text); }
+    .topnav a.active::after { transform: scaleX(1); }
+
+    main { overflow: hidden; }
+    .page {
+      width: min(var(--max), calc(100% - 64px));
+      margin: 0 auto;
+    }
+    section { scroll-margin-top: 88px; }
+
+    .hero { padding: 62px 0 38px; }
+    .hero-copy { max-width: 770px; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 {
+      margin-bottom: 20px;
+      font-size: clamp(46px, 6vw, 78px);
+      line-height: 1.08;
+      letter-spacing: -.045em;
+    }
+    h1 .accent { display: block; color: var(--cyan); }
+    .hero-copy > p {
+      max-width: 690px;
+      margin-bottom: 26px;
+      color: #b8c8d7;
+      font-size: 18px;
+    }
+    .hero-actions { display: flex; gap: 14px; flex-wrap: wrap; }
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 48px;
+      padding: 0 20px;
+      border: 1px solid var(--cyan);
+      border-radius: 9px;
+      color: var(--text);
+      font-weight: 720;
+      transition: transform .18s ease, background .18s ease;
+    }
+    .button.primary { background: var(--cyan); color: #00121f; }
+    .button:hover { transform: translateY(-2px); color: inherit; }
+    .button.secondary:hover { background: rgba(85, 204, 246, .1); }
+
+    .architecture {
+      position: relative;
+      margin-top: 42px;
+      padding: 28px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background-color: rgba(5, 22, 36, .9);
+      background-image:
+        linear-gradient(rgba(65, 118, 153, .07) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(65, 118, 153, .07) 1px, transparent 1px);
+      background-size: 22px 22px;
+    }
+    .architecture-grid {
+      display: grid;
+      grid-template-columns: 1fr 36px 1fr 36px 1.15fr 36px 1.3fr 36px 1.1fr;
+      align-items: center;
+      gap: 4px;
+    }
+    .arch-node {
+      position: relative;
+      min-height: 142px;
+      padding: 18px;
+      border: 1px solid var(--line-strong);
+      border-radius: 10px;
+      background: rgba(8, 30, 48, .94);
+      transition: transform .18s ease, border-color .18s ease;
+    }
+    .arch-node:hover { transform: translateY(-3px); border-color: var(--cyan); }
+    .arch-node h3 { margin: 0 0 9px; font-size: 17px; }
+    .arch-node p { margin: 0; color: var(--muted); font-size: 13px; }
+    .arch-node.cyan { border-color: #21779a; }
+    .arch-node.amber { border-color: #8c681b; background: rgba(42, 34, 14, .9); }
+    .arch-node.violet { border-color: #65479b; background: rgba(34, 26, 60, .88); }
+    .arch-node.green { border-color: #497936; }
+    .arch-symbol {
+      display: grid;
+      place-items: center;
+      width: 38px;
+      height: 38px;
+      margin-bottom: 14px;
+      border: 1px solid currentColor;
+      border-radius: 8px;
+      color: var(--cyan);
+      font: 700 17px var(--mono);
+    }
+    .arch-node.amber .arch-symbol { color: var(--amber); }
+    .arch-node.violet .arch-symbol { color: var(--violet); }
+    .arch-node.green .arch-symbol { color: var(--green); }
+    .arrow {
+      position: relative;
+      height: 1px;
+      background: #7f96aa;
+    }
+    .arrow::after {
+      content: "";
+      position: absolute;
+      right: -1px;
+      top: -4px;
+      border-left: 7px solid #7f96aa;
+      border-top: 4px solid transparent;
+      border-bottom: 4px solid transparent;
+    }
+    [data-tip]::after {
+      content: attr(data-tip);
+      position: absolute;
+      left: 50%;
+      bottom: calc(100% + 10px);
+      z-index: 5;
+      width: max-content;
+      max-width: 270px;
+      padding: 8px 10px;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: #0b2032;
+      color: var(--text);
+      font-size: 12px;
+      line-height: 1.45;
+      opacity: 0;
+      pointer-events: none;
+      transform: translate(-50%, 6px);
+      transition: opacity .16s ease, transform .16s ease;
+    }
+    [data-tip]:hover::after, [data-tip]:focus-visible::after {
+      opacity: 1;
+      transform: translate(-50%, 0);
+    }
+    .legend {
+      display: flex;
+      gap: 24px;
+      flex-wrap: wrap;
+      margin-top: 22px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .legend i {
+      display: inline-block;
+      width: 11px;
+      height: 11px;
+      margin-right: 7px;
+      border: 2px solid currentColor;
+      border-radius: 50%;
+    }
+
+    .chapter {
+      margin: 40px 0;
+      padding: 42px 0;
+      border-top: 1px solid var(--line);
+    }
+    .chapter-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 32px;
+      margin-bottom: 28px;
+    }
+    .chapter h2 {
+      margin-bottom: 8px;
+      font-size: clamp(29px, 3.2vw, 42px);
+      line-height: 1.2;
+      letter-spacing: -.025em;
+    }
+    .chapter-head p { max-width: 720px; margin: 0; color: var(--muted); }
+    .section-number { color: var(--cyan); font-family: var(--mono); }
+
+    .why-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 1px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--line);
+    }
+    .why-item { padding: 26px; background: var(--surface); }
+    .why-item strong { display: block; margin-bottom: 7px; font-size: 18px; }
+    .why-item p { margin: 0; color: var(--muted); font-size: 14px; }
+
+    .mode-switch {
+      flex: 0 0 auto;
+      display: inline-flex;
+      padding: 3px;
+      border: 1px solid var(--line-strong);
+      border-radius: 9px;
+      background: var(--bg-deep);
+    }
+    .mode-switch button {
+      padding: 8px 16px;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 720;
+    }
+    .mode-switch button.active {
+      background: var(--cyan-soft);
+      color: var(--cyan);
+    }
+
+    .model-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(320px, .75fr);
+      gap: 22px;
+    }
+    .timeline-panel, .explain-panel, .dream-panel, .formula-panel {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(7, 24, 39, .84);
+    }
+    .timeline-panel { padding: 24px; overflow-x: auto; }
+    .timeline {
+      min-width: 760px;
+      display: grid;
+      grid-template-columns: 140px repeat(4, minmax(110px, 1fr));
+      align-items: stretch;
+    }
+    .timeline > div {
+      min-height: 58px;
+      padding: 10px;
+      border-bottom: 1px solid rgba(40, 81, 113, .5);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #cad7e4;
+      font-family: var(--mono);
+      font-size: 13px;
+      transition: opacity .2s ease, background .2s ease;
+    }
+    .timeline .label {
+      justify-content: flex-start;
+      color: var(--muted);
+      font-family: var(--sans);
+      font-weight: 700;
+    }
+    .timeline .obs, .timeline .post { color: var(--cyan); }
+    .timeline .prior { color: var(--amber); }
+    .timeline .sample { color: var(--violet); }
+    .timeline .cell {
+      margin: 7px;
+      min-height: 38px;
+      border: 1px solid currentColor;
+      border-radius: 7px;
+      background: rgba(8, 30, 48, .8);
+    }
+    .mode-imagine .observed { opacity: .26; }
+    .mode-imagine .prior { background: rgba(60, 48, 20, .36); }
+    .mode-observe .imagined { opacity: .36; }
+    .explain-panel { padding: 26px; }
+    .explain-panel h3 { margin-bottom: 9px; font-size: 19px; }
+    .explain-panel p { color: var(--muted); font-size: 14px; }
+    .explain-panel hr { border: 0; border-top: 1px solid var(--line); margin: 24px 0; }
+    .formula {
+      padding: 15px;
+      border-left: 3px solid var(--amber);
+      background: rgba(58, 45, 16, .38);
+      color: #f8d88d;
+      font-family: var(--mono);
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+
+    .dream-panel { padding: 26px; overflow-x: auto; }
+    .dream-grid {
+      min-width: 940px;
+      display: grid;
+      grid-template-columns: 140px repeat(6, minmax(105px, 1fr));
+      gap: 8px 10px;
+      align-items: center;
+    }
+    .dream-grid .row-label { color: var(--muted); font-size: 13px; font-weight: 720; }
+    .dream-cell {
+      padding: 9px;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      text-align: center;
+      font: 13px var(--mono);
+    }
+    .dream-cell.actor { color: var(--violet); border-color: #65479b; background: var(--violet-soft); }
+    .dream-cell.state { color: var(--cyan); border-color: #287b9f; background: var(--cyan-soft); }
+    .dream-cell.reward { color: var(--green); border-color: #4d7b38; background: var(--green-soft); }
+    .dream-cell.value { color: var(--blue); border-color: #315ca4; background: var(--blue-soft); }
+    .loss-grid {
+      display: grid;
+      grid-template-columns: 1.2fr .8fr;
+      gap: 18px;
+      margin-top: 18px;
+    }
+    .formula-panel { padding: 22px; }
+    .formula-panel h3 { margin-bottom: 16px; font-size: 17px; }
+    .loss-row { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+    .loss {
+      flex: 1 1 130px;
+      min-height: 82px;
+      padding: 12px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      text-align: center;
+      font-family: var(--mono);
+      font-size: 13px;
+    }
+    .loss.cyan { color: var(--cyan); }
+    .loss.green { color: var(--green); }
+    .loss.amber { color: var(--amber); }
+    .loss.violet { color: var(--violet); }
+    .loss.blue { color: var(--blue); }
+
+    .action-compare {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      margin-top: 18px;
+    }
+    .compare-column {
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+    }
+    .compare-column h3 { font-size: 18px; }
+    .compare-column ul { margin: 0; padding-left: 20px; color: var(--muted); }
+    code { font-family: var(--mono); }
+
+    .code-shell {
+      display: grid;
+      grid-template-columns: 210px minmax(0, 1fr) 290px;
+      min-height: 570px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #061522;
+    }
+    .symbol-nav, .annotation { padding: 18px; background: #081b2b; }
+    .symbol-nav { border-right: 1px solid var(--line); }
+    .annotation { border-left: 1px solid var(--line); }
+    .symbol-nav h3, .annotation h3 {
+      margin-bottom: 14px;
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .symbol-nav button {
+      width: 100%;
+      margin-bottom: 7px;
+      padding: 11px 12px;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      background: transparent;
+      color: #bac9d7;
+      cursor: pointer;
+      text-align: left;
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .symbol-nav button:hover { background: rgba(31, 73, 103, .38); }
+    .symbol-nav button.active {
+      border-color: #23567b;
+      background: #102e48;
+      color: var(--cyan);
+    }
+    .code-main { min-width: 0; }
+    .code-toolbar {
+      min-height: 48px;
+      padding: 0 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .copy-button {
+      padding: 6px 10px;
+      border: 1px solid var(--line-strong);
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .copy-button:hover { color: var(--text); border-color: var(--cyan); }
+    pre {
+      margin: 0;
+      padding: 20px;
+      overflow: auto;
+      color: #d5e5f3;
+      font: 12px/1.68 var(--mono);
+      tab-size: 4;
+    }
+    .annotation-title { margin-bottom: 8px; font-size: 17px; }
+    .annotation p, .annotation li { color: var(--muted); font-size: 13px; }
+    .annotation ul { padding-left: 18px; }
+    .annotation .source {
+      display: inline-block;
+      margin-top: 10px;
+      color: var(--cyan);
+      font: 12px var(--mono);
+    }
+
+    .update-layout {
+      display: grid;
+      grid-template-columns: .9fr 1.1fr;
+      gap: 26px;
+    }
+    .steps {
+      position: relative;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    .steps::before {
+      content: "";
+      position: absolute;
+      left: 17px;
+      top: 21px;
+      bottom: 21px;
+      width: 1px;
+      background: var(--line-strong);
+    }
+    .steps li {
+      position: relative;
+      min-height: 78px;
+      padding: 12px 14px 12px 58px;
+      border-bottom: 1px solid var(--line);
+    }
+    .step-number {
+      position: absolute;
+      left: 0;
+      top: 14px;
+      width: 35px;
+      height: 35px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--blue);
+      color: white;
+      font: 750 12px var(--mono);
+    }
+    .steps strong { display: block; margin-bottom: 2px; }
+    .steps p { margin: 0; color: var(--muted); font-size: 13px; }
+    .shape { color: var(--cyan); font-family: var(--mono); }
+
+    .run-panel {
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+    }
+    .run-panel h3 { margin-bottom: 8px; font-size: 18px; }
+    .run-panel > p { color: var(--muted); font-size: 14px; }
+    .command {
+      position: relative;
+      margin: 12px 0;
+      padding: 17px 88px 17px 17px;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: #020b13;
+      color: #d8e7f4;
+      font: 12px/1.6 var(--mono);
+      overflow-wrap: anywhere;
+    }
+    .command button { position: absolute; right: 10px; top: 10px; }
+    .config-table {
+      width: 100%;
+      margin-top: 18px;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .config-table th, .config-table td {
+      padding: 10px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+    }
+    .config-table th { color: var(--muted); font-weight: 650; }
+    .config-table td:nth-child(2) { color: var(--cyan); font-family: var(--mono); }
+
+    .troubleshoot { margin-top: 24px; }
+    details {
+      border-bottom: 1px solid var(--line);
+      background: rgba(6, 21, 34, .5);
+    }
+    details:first-child { border-top: 1px solid var(--line); }
+    summary {
+      position: relative;
+      padding: 15px 40px 15px 12px;
+      cursor: pointer;
+      font-weight: 680;
+      list-style: none;
+    }
+    summary::-webkit-details-marker { display: none; }
+    summary::after {
+      content: "+";
+      position: absolute;
+      right: 14px;
+      top: 13px;
+      color: var(--cyan);
+      font: 20px var(--mono);
+    }
+    details[open] summary::after { content: "−"; }
+    details p { margin: 0; padding: 0 42px 16px 12px; color: var(--muted); font-size: 13px; }
+
+    footer {
+      margin-top: 50px;
+      border-top: 1px solid var(--line);
+      background: #010a13;
+    }
+    .footer-inner {
+      width: min(var(--max), calc(100% - 64px));
+      min-height: 96px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 22px;
+      color: var(--faint);
+      font-size: 14px;
+    }
+
+    @media (max-width: 1050px) {
+      .architecture-grid { grid-template-columns: 1fr 26px 1fr 26px 1fr; }
+      .architecture-grid .wide-arrow { display: none; }
+      .architecture-grid .late { margin-top: 18px; }
+      .model-layout, .update-layout { grid-template-columns: 1fr; }
+      .loss-grid { grid-template-columns: 1fr; }
+      .code-shell { grid-template-columns: 180px minmax(0, 1fr); }
+      .annotation { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--line); }
+    }
+
+    @media (max-width: 720px) {
+      body { font-size: 15px; }
+      .topbar-inner { min-height: 58px; padding: 0 18px; }
+      .brand { font-size: 17px; }
+      .brand span { display: none; }
+      .topnav { gap: 15px; overflow-x: auto; }
+      .topnav a { padding: 17px 0 15px; font-size: 12px; }
+      .topnav a:nth-child(2), .topnav a:nth-child(4) { display: none; }
+      .page { width: min(100% - 32px, var(--max)); }
+      .hero { padding-top: 42px; }
+      h1 { font-size: 46px; }
+      .hero-copy > p { font-size: 16px; }
+      .architecture { padding: 18px; }
+      .architecture-grid { display: flex; flex-direction: column; gap: 10px; }
+      .arch-node { width: 100%; min-height: auto; }
+      .arrow { width: 1px; height: 25px; }
+      .arrow::after {
+        right: -4px;
+        top: auto;
+        bottom: -1px;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-top: 7px solid #7f96aa;
+        border-bottom: 0;
+      }
+      .architecture-grid .wide-arrow { display: block; }
+      .architecture-grid .late { margin-top: 0; }
+      .why-grid, .action-compare { grid-template-columns: 1fr; }
+      .chapter { padding: 32px 0; margin: 24px 0; }
+      .chapter-head { display: block; }
+      .mode-switch { margin-top: 16px; }
+      .code-shell { display: block; }
+      .symbol-nav {
+        display: flex;
+        gap: 7px;
+        overflow-x: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .symbol-nav h3 { display: none; }
+      .symbol-nav button { width: auto; flex: 0 0 auto; margin: 0; }
+      .annotation { border-left: 0; }
+      pre { max-height: 500px; font-size: 11px; }
+      .footer-inner { width: calc(100% - 32px); gap: 12px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after {
+        scroll-behavior: auto !important;
+        transition-duration: .01ms !important;
+        animation-duration: .01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到正文</a>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#top">Dreamer V2 <span>原理与代码</span></a>
+      <nav class="topnav" aria-label="主导航">
+        <a href="#principle">原理</a>
+        <a href="#model">数据流</a>
+        <a href="#code">代码</a>
+        <a href="#update">训练</a>
+        <a href="#debug">调试</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <div class="page">
+      <section class="hero" id="top" data-section="principle">
+        <div class="hero-copy">
+          <h1><span class="accent">Dreamer V2：</span>在潜空间里学习世界</h1>
+          <p>智能体先用离散 RSSM 压缩并预测环境，再从真实序列的后验状态出发，在模型内部想象未来，训练 Actor 与 Critic。</p>
+          <div class="hero-actions">
+            <a class="button primary" href="#principle">开始理解 ↓</a>
+            <a class="button secondary" href="#code">查看代码 〈/〉</a>
+          </div>
+        </div>
+
+        <div class="architecture" aria-label="Dreamer V2 架构图">
+          <div class="architecture-grid">
+            <div class="arch-node cyan" tabindex="0" data-tip="环境返回三维图像 x_t，进入回放缓冲区并归一化到 [-0.5, 0.5]。">
+              <span class="arch-symbol">xₜ</span>
+              <h3>环境图像</h3>
+              <p>CarRacing 灰度帧堆叠<br>uint8 [2, 96, 96]</p>
+            </div>
+            <span class="arrow" aria-hidden="true"></span>
+            <div class="arch-node cyan" tabindex="0" data-tip="四层步幅卷积只负责提取当前观测特征，不直接决定动作。">
+              <span class="arch-symbol">E</span>
+              <h3>卷积编码器</h3>
+              <p>image → embedding</p>
+            </div>
+            <span class="arrow" aria-hidden="true"></span>
+            <div class="arch-node amber" tabindex="0" data-tip="GRU 用上一随机状态和上一动作更新 h_t；先验只依赖历史，后验额外看到当前观测。">
+              <span class="arch-symbol">h,z</span>
+              <h3>离散 RSSM</h3>
+              <p>p(zₜ|hₜ) 与 q(zₜ|hₜ,xₜ)<br>32 × 32 categorical</p>
+            </div>
+            <span class="arrow wide-arrow" aria-hidden="true"></span>
+            <div class="arch-node green late" tabindex="0" data-tip="世界模型从 [h_t,z_t] 同时学习重建图像、预测奖励和判断任务是否继续。">
+              <span class="arch-symbol">ŷ</span>
+              <h3>世界模型预测</h3>
+              <p>图像 / 奖励 / 继续概率</p>
+            </div>
+            <span class="arrow wide-arrow" aria-hidden="true"></span>
+            <div class="arch-node violet late" tabindex="0" data-tip="Actor 选择动作，RSSM 先验向前滚动；Critic 用 λ-return 学习想象轨迹的价值。">
+              <span class="arch-symbol">π,V</span>
+              <h3>潜空间想象</h3>
+              <p>Actor → RSSM → Critic<br>无需再次访问环境</p>
+            </div>
+          </div>
+          <div class="legend" aria-label="颜色图例">
+            <span style="color:var(--cyan)"><i></i>观测与后验</span>
+            <span style="color:var(--amber)"><i></i>先验与 KL</span>
+            <span style="color:var(--green)"><i></i>奖励与继续</span>
+            <span style="color:var(--violet)"><i></i>行为学习</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="chapter" id="principle" data-section="principle">
+        <div class="chapter-head">
+          <div>
+            <h2><span class="section-number">01.</span> 为什么需要 Dreamer V2？</h2>
+            <p>像素空间庞大，逐帧用真实环境训练策略成本很高。Dreamer V2 把感知、预测与行为学习分开，让大部分策略更新发生在紧凑潜状态中。</p>
+          </div>
+        </div>
+        <div class="why-grid">
+          <article class="why-item">
+            <strong>表示</strong>
+            <p>编码器和后验把图像压缩为确定状态 hₜ 与多个类别变量 zₜ。</p>
+          </article>
+          <article class="why-item">
+            <strong>预测</strong>
+            <p>RSSM 先验仅凭历史状态与动作预测未来潜状态，并由多个预测头约束其信息量。</p>
+          </article>
+          <article class="why-item">
+            <strong>行为</strong>
+            <p>Actor-Critic 从后验状态出发，在 RSSM 先验生成的轨迹中反复学习。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="chapter mode-observe" id="model" data-section="model">
+        <div class="chapter-head">
+          <div>
+            <h2><span class="section-number">02.</span> 世界模型如何学习</h2>
+            <p>回放序列中的第 t 个观测与上一动作 aₜ₋₁ 对齐。先验负责预测，后验利用 xₜ 修正预测，KL balance 让两者逐渐靠近。</p>
+          </div>
+          <div class="mode-switch" role="tablist" aria-label="轨迹显示模式">
+            <button class="active" type="button" role="tab" aria-selected="true" data-mode="observe">观察轨迹</button>
+            <button type="button" role="tab" aria-selected="false" data-mode="imagine">想象轨迹</button>
+          </div>
+        </div>
+
+        <div class="model-layout">
+          <div class="timeline-panel" aria-label="RSSM 时间对齐图">
+            <div class="timeline">
+              <div class="label">时间步</div><div>t−1</div><div>t</div><div>t+1</div><div>t+2</div>
+              <div class="label obs">观测 xₜ</div><div class="cell obs observed">xₜ₋₁</div><div class="cell obs observed">xₜ</div><div class="cell obs observed">xₜ₊₁</div><div class="cell obs observed">xₜ₊₂</div>
+              <div class="label">上一动作</div><div class="cell">aₜ₋₂</div><div class="cell">aₜ₋₁</div><div class="cell">aₜ</div><div class="cell">aₜ₊₁</div>
+              <div class="label">确定状态 hₜ</div><div class="cell">hₜ₋₁</div><div class="cell">hₜ</div><div class="cell">hₜ₊₁</div><div class="cell">hₜ₊₂</div>
+              <div class="label prior">先验 p(zₜ|hₜ)</div><div class="cell prior imagined">pₜ₋₁</div><div class="cell prior imagined">pₜ</div><div class="cell prior imagined">pₜ₊₁</div><div class="cell prior imagined">pₜ₊₂</div>
+              <div class="label post">后验 q(zₜ|hₜ,xₜ)</div><div class="cell post observed">qₜ₋₁</div><div class="cell post observed">qₜ</div><div class="cell post observed">qₜ₊₁</div><div class="cell post observed">qₜ₊₂</div>
+              <div class="label sample">类别样本 zₜ</div><div class="cell sample">0010…</div><div class="cell sample">0100…</div><div class="cell sample">0001…</div><div class="cell sample">1000…</div>
+            </div>
+          </div>
+
+          <aside class="explain-panel">
+            <h3>直通 categorical 采样</h3>
+            <p>前向计算使用真正的 one-hot 样本，反向计算把梯度交给 softmax 概率。这让离散状态既有明确类别，又能端到端训练。</p>
+            <div class="formula">z = one_hot(sample(logits))<br>z_st = z + softmax(logits) − stop_grad(softmax(logits))</div>
+            <hr>
+            <h3>KL balance 与 free nats</h3>
+            <p>后验正则项更新 q，先验拟合项更新 p。本实现给先验 0.8 权重，并在平均 KL 低于 1 nat 时停止继续压缩。</p>
+            <div class="formula">L_KL = 0.2 KL(q || sg(p)) + 0.8 KL(sg(q) || p)</div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="chapter" id="imagination" data-section="model">
+        <div class="chapter-head">
+          <div>
+            <h2><span class="section-number">03.</span> 在潜空间里做梦</h2>
+            <p>起点来自真实序列的后验状态。后续 15 步只调用 Actor、RSSM 先验、奖励头、继续头和目标 Critic。</p>
+          </div>
+        </div>
+
+        <div class="dream-panel" aria-label="想象轨迹与 lambda return">
+          <div class="dream-grid">
+            <span class="row-label">想象时间</span><span>t</span><span>t+1</span><span>t+2</span><span>…</span><span>t+H−1</span><span>t+H</span>
+            <span class="row-label">Actor 动作</span><span class="dream-cell actor">aₜ</span><span class="dream-cell actor">aₜ₊₁</span><span class="dream-cell actor">aₜ₊₂</span><span>…</span><span class="dream-cell actor">aₜ₊H₋₁</span><span>—</span>
+            <span class="row-label">RSSM 先验状态</span><span class="dream-cell state">sₜ</span><span class="dream-cell state">sₜ₊₁</span><span class="dream-cell state">sₜ₊₂</span><span>…</span><span class="dream-cell state">sₜ₊H₋₁</span><span class="dream-cell state">sₜ₊H</span>
+            <span class="row-label">奖励 / 继续</span><span>—</span><span class="dream-cell reward">r̂ₜ₊₁,ĉₜ₊₁</span><span class="dream-cell reward">r̂ₜ₊₂,ĉₜ₊₂</span><span>…</span><span class="dream-cell reward">r̂ₜ₊H₋₁,ĉ</span><span class="dream-cell reward">r̂ₜ₊H,ĉ</span>
+            <span class="row-label">目标价值</span><span class="dream-cell value">V(sₜ)</span><span class="dream-cell value">V(sₜ₊₁)</span><span class="dream-cell value">V(sₜ₊₂)</span><span>…</span><span class="dream-cell value">V(sₜ₊H₋₁)</span><span class="dream-cell value">V(sₜ₊H)</span>
+            <span class="row-label">λ-return</span><span class="dream-cell value">Gₜ</span><span class="dream-cell value">Gₜ₊₁</span><span class="dream-cell value">Gₜ₊₂</span><span>…</span><span class="dream-cell value">Gₜ₊H₋₁</span><span>bootstrap</span>
+          </div>
+        </div>
+
+        <div class="loss-grid">
+          <div class="formula-panel">
+            <h3>世界模型损失</h3>
+            <div class="loss-row">
+              <div class="loss cyan">L_recon<br>图像 MSE</div>
+              <span>+</span>
+              <div class="loss green">L_reward<br>奖励 MSE</div>
+              <span>+</span>
+              <div class="loss green">L_continue<br>二元交叉熵</div>
+              <span>+</span>
+              <div class="loss amber">L_KL<br>平衡先验与后验</div>
+            </div>
+          </div>
+          <div class="formula-panel">
+            <h3>行为学习损失</h3>
+            <div class="loss-row">
+              <div class="loss violet">Actor<br>最大化加权 Gλ</div>
+              <span>+</span>
+              <div class="loss blue">Critic<br>拟合 stop_grad(Gλ)</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="action-compare">
+          <article class="compare-column">
+            <h3>离散动作：Categorical + REINFORCE</h3>
+            <ul>
+              <li>环境动作返回 <code>int</code>，世界模型接收 one-hot。</li>
+              <li>采样动作不可导，Actor 用 <code>log_prob × advantage</code> 更新。</li>
+              <li>熵系数默认 <code>1e-3</code>。</li>
+            </ul>
+          </article>
+          <article class="compare-column">
+            <h3>连续动作：tanh-Normal + dynamics gradient</h3>
+            <ul>
+              <li>重参数采样后经 tanh 限制到 <code>[-1, 1]</code>。</li>
+              <li>回报梯度穿过冻结的世界模型回到 Actor。</li>
+              <li>熵系数默认 <code>1e-4</code>。</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section class="chapter" id="code" data-section="code">
+        <div class="chapter-head">
+          <div>
+            <h2><span class="section-number">04.</span> 代码与原理逐段对应</h2>
+            <p>下面的片段直接摘自本仓库实现。切换符号可查看它在算法中的职责；源码说明使用类名和方法名定位，不依赖易漂移的行号。</p>
+          </div>
+        </div>
+
+        <div class="code-shell">
+          <nav class="symbol-nav" aria-label="代码符号导航">
+            <h3>文件 / 符号</h3>
+            <button type="button" data-code="config">Config</button>
+            <button type="button" data-code="replay">SequenceReplayBuffer</button>
+            <button class="active" type="button" data-code="rssm">RSSM</button>
+            <button type="button" data-code="world">WorldModel</button>
+            <button type="button" data-code="agent">DreamerV2Agent</button>
+            <button type="button" data-code="entry">训练入口</button>
+          </nav>
+          <div class="code-main">
+            <div class="code-toolbar">
+              <span id="code-file">Dreamer/dreamerv2.py · RSSM._sample</span>
+              <button class="copy-button" type="button" id="copy-code">复制代码</button>
+            </div>
+            <pre aria-live="polite"><code id="code-view"></code></pre>
+          </div>
+          <aside class="annotation" aria-live="polite">
+            <h3>代码与原理映射</h3>
+            <strong class="annotation-title" id="annotation-title">直通离散采样</strong>
+            <p id="annotation-text">前向使用 one-hot，反向把梯度交给类别概率。该状态随后与 GRU 确定状态拼接成模型特征。</p>
+            <ul id="annotation-list">
+              <li><code>sample=True</code>：训练时随机采样。</li>
+              <li><code>sample=False</code>：评估时选择最大概率类别。</li>
+              <li>每个随机变量有 <code>stoch_classes</code> 个类别。</li>
+            </ul>
+            <span class="source" id="annotation-source">RSSM._sample()</span>
+          </aside>
+        </div>
+      </section>
+
+      <section class="chapter" id="update" data-section="update">
+        <div class="chapter-head">
+          <div>
+            <h2><span class="section-number">05.</span> 一次训练更新发生了什么</h2>
+            <p><code>DreamerV2Agent.step()</code> 先更新世界模型，再把后验状态展平为想象起点，更新 Actor 和 Critic。</p>
+          </div>
+        </div>
+
+        <div class="update-layout">
+          <ol class="steps">
+            <li><span class="step-number">1</span><strong>采样连续序列</strong><p><span class="shape">observation [B,T,C,H,W]</span>，首帧动作与奖励清零。</p></li>
+            <li><span class="step-number">2</span><strong>更新世界模型</strong><p>编码整段观测，逐时刻执行 <code>obs_step</code>，联合计算四类损失。</p></li>
+            <li><span class="step-number">3</span><strong>从后验状态出发</strong><p>把 <span class="shape">[B,T,…]</span> 展平；排除真正终止状态。</p></li>
+            <li><span class="step-number">4</span><strong>生成想象轨迹</strong><p>Actor 与 RSSM 先验滚动 <span class="shape">H=15</span> 步。</p></li>
+            <li><span class="step-number">5</span><strong>更新 Actor</strong><p>离散动作使用 REINFORCE；连续动作使用 dynamics gradient。</p></li>
+            <li><span class="step-number">6</span><strong>更新 Critic</strong><p>拟合停止梯度的 λ-return；每 100 次更新同步目标 Critic。</p></li>
+          </ol>
+
+          <div class="run-panel">
+            <h3>关键默认配置</h3>
+            <p>默认值面向可读的最小实现，完整 CarRacing 训练仍建议使用 CUDA。</p>
+            <table class="config-table">
+              <thead><tr><th>配置</th><th>默认值</th><th>作用</th></tr></thead>
+              <tbody>
+                <tr><td>sequence_length</td><td>32</td><td>真实训练序列长度</td></tr>
+                <tr><td>imagination_horizon</td><td>15</td><td>想象轨迹长度</td></tr>
+                <tr><td>discount / lambda</td><td>0.99 / 0.95</td><td>λ-return 权重</td></tr>
+                <tr><td>stoch_dim × classes</td><td>32 × 32</td><td>离散随机状态</td></tr>
+                <tr><td>train_every</td><td>5</td><td>环境步与更新频率</td></tr>
+                <tr><td>slow_target_update</td><td>100</td><td>目标 Critic 同步间隔</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="chapter" id="debug" data-section="debug">
+        <div class="chapter-head">
+          <div>
+            <h2><span class="section-number">06.</span> 运行、评估与排错</h2>
+            <p>训练入口保持仓库现有脚本风格：在文件底部修改 <code>update</code> 和 <code>continuous</code>，再直接运行。</p>
+          </div>
+        </div>
+
+        <div class="run-panel">
+          <h3>运行命令</h3>
+          <p>训练：设置 <code>update = 1</code>；评估：设置 <code>update = 0</code>。连续与离散模式由 <code>continuous</code> 控制。</p>
+          <div class="command"><span>python Dreamer/dreamerv2.py</span><button class="copy-button" type="button" data-copy="python Dreamer/dreamerv2.py">复制</button></div>
+          <div class="command"><span>python -m unittest discover -s tests -p 'test_dreamerv2.py' -v</span><button class="copy-button" type="button" data-copy="python -m unittest discover -s tests -p 'test_dreamerv2.py' -v">复制</button></div>
+        </div>
+
+        <div class="troubleshoot">
+          <details>
+            <summary>观测形状是否正确？</summary>
+            <p>教学实现只接受 CarRacing 包装器输出的 <code>uint8 [2,96,96]</code> CHW 图像。固定输入让四层卷积严格得到 <code>6×6</code> 特征，四层转置卷积严格恢复为 <code>96×96</code>。回放采样后形状为 <code>[B,T,2,96,96]</code>，并归一化到 <code>[-0.5,0.5]</code>。</p>
+          </details>
+          <details>
+            <summary>动作编码是否正确？</summary>
+            <p>离散环境动作是整数，进入 RSSM 前转换为 one-hot；连续动作是长度为 action_dim 的 float32 向量，并要求环境动作范围已经缩放到 <code>[-1,1]</code>。</p>
+          </details>
+          <details>
+            <summary>terminated 与 truncated 如何处理？</summary>
+            <p>两者都会结束 episode，避免序列跨回合。只有 <code>terminated</code> 把继续目标设为 0；时间限制 <code>truncated</code> 保留 bootstrap。</p>
+          </details>
+          <details>
+            <summary>为什么 loss 出现 NaN 或 Inf？</summary>
+            <p>先检查原始观测和动作是否有限，再查看模型、Actor、Critic 的梯度范数。实现会进行梯度裁剪，但无法修复输入中的非有限数。</p>
+          </details>
+          <details>
+            <summary>如何判断世界模型是否学到了有效状态？</summary>
+            <p>数值损失只说明优化过程。还应比较 <code>reconstruction</code> 与真实序列，并检查仅依赖先验滚动时的图像、奖励和继续预测是否随时间保持合理。</p>
+          </details>
+          <details>
+            <summary>检查点包含哪些内容？</summary>
+            <p>保存世界模型、Actor、Critic、目标 Critic、三个优化器和更新次数。文件名根据连续或离散模式分别生成，避免互相覆盖。</p>
+          </details>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer>
+    <div class="footer-inner">
+      <a href="#top">返回顶部</a><span>/</span>
+      <a href="https://arxiv.org/abs/2010.02193" target="_blank" rel="noreferrer">论文</a><span>/</span>
+      <a href="https://github.com/danijar/dreamerv2" target="_blank" rel="noreferrer">官方实现</a>
+    </div>
+  </footer>
+
+  <template id="code-config">@dataclass
+class Config:
+    discount: float = 0.99
+    discount_lambda: float = 0.95
+    capacity: int = 100_000
+    batch_size: int = 16
+    sequence_length: int = 32
+    imagination_horizon: int = 15
+    prefill: int = 1_000
+    train_every: int = 5
+    train_steps: int = 1
+    total_steps: int = 1_000_000</template>
+
+  <template id="code-replay">def sample(self, batch_size, sequence_length):
+    if batch_size &lt; 1:
+        raise ValueError("batch_size must be positive")
+    if sequence_length &lt; 2:
+        raise ValueError("sequence_length must be at least two")
+    eligible = [
+        episode
+        for episode in self.episodes
+        if len(episode["observation"]) &gt;= sequence_length
+    ]
+    if not eligible:
+        raise RuntimeError("no episode is long enough for this sequence")
+
+    chunks = []
+    for _ in range(batch_size):
+        episode = eligible[np.random.randint(len(eligible))]
+        upper = len(episode["observation"]) - sequence_length + 1
+        start = np.random.randint(upper)
+        chunk = {
+            key: value[start : start + sequence_length].copy()
+            for key, value in episode.items()
+        }
+        # 任意截取点都视作新的递归起点，首个动作和奖励不再依赖片段外历史。
+        chunk["action"][0] = 0.0
+        chunk["reward"][0] = 0.0
+        chunk["continue"][0] = 1.0
+        chunk["is_first"][0] = 1.0
+        chunk["terminated"][0] = 0.0
+        chunk["truncated"][0] = 0.0
+        chunks.append(chunk)</template>
+
+  <template id="code-rssm">def _sample(self, logits, sample):
+    probabilities = torch.softmax(logits, dim=-1)
+    if sample:
+        index = Categorical(logits=logits).sample()
+    else:
+        index = logits.argmax(dim=-1)
+    hard = F.one_hot(index, self.stoch_classes).to(probabilities.dtype)
+    # 前向使用 one-hot，反向使用类别概率的梯度。
+    return hard + probabilities - probabilities.detach()</template>
+
+  <template id="code-world">def _kl_loss(self, posterior_logits, prior_logits):
+    posterior = torch.softmax(posterior_logits, dim=-1)
+    prior = torch.softmax(prior_logits, dim=-1)
+
+    def categorical_kl(left, right):
+        return (
+            left
+            * (
+                torch.log(left.clamp_min(1e-8))
+                - torch.log(right.clamp_min(1e-8))
+            )
+        ).sum(dim=(-1, -2))
+
+    # KL balance 让先验承担更多拟合责任，后验仍保留较弱的正则梯度。
+    posterior_kl = categorical_kl(posterior, prior.detach()).mean()
+    prior_kl = categorical_kl(posterior.detach(), prior).mean()
+    free = posterior_kl.new_tensor(self.config.free_nats)
+    loss = (
+        (1.0 - self.config.kl_balance)
+        * torch.maximum(posterior_kl, free)
+        + self.config.kl_balance * torch.maximum(prior_kl, free)
+    )
+    value = categorical_kl(posterior.detach(), prior.detach()).mean()
+    return loss, value</template>
+
+  <template id="code-agent">def _imagine(self, start):
+    horizon = self.config.imagination_horizon
+    states = [start]
+    log_prob, entropy = [], []
+    state = start
+    for _ in range(horizon):
+        feature = self.world_model.rssm.get_feature(state)
+        actor_output = self.actor.sample(feature)
+        state = self.world_model.rssm.img_step(
+            state, actor_output["action"]
+        )
+        states.append(state)
+        log_prob.append(actor_output["log_prob"])
+        entropy.append(actor_output["entropy"])
+
+    feature = torch.stack(
+        [self.world_model.rssm.get_feature(state) for state in states]
+    )
+    next_feature = feature[1:]
+    reward = self.world_model.reward(next_feature)
+    continued = torch.sigmoid(
+        self.world_model.continue_head(next_feature)
+    )
+    discount = self.config.discount * continued</template>
+
+  <template id="code-entry">if __name__ == "__main__":
+    update = 1
+    continuous = True
+    config = Config()
+    np.random.seed(config.seed)
+    torch.manual_seed(config.seed)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    env = make_carracing_env(update, continuous)
+    agent = build_agent(env, config, device)
+    if bool(update):
+        agent.load("last")
+        train(env, agent, config)
+    else:
+        if not agent.load("best") and not agent.load("last"):
+            raise FileNotFoundError("no Dreamer V2 checkpoint found")
+        evaluate(env, agent, config.eval_episodes)
+    env.close()</template>
+
+  <script>
+    const codeMeta = {
+      config: {
+        file: "Dreamer/dreamerv2.py · Config",
+        title: "集中管理训练规模",
+        text: "数据量、模型尺寸、KL、想象长度和优化器参数都集中在 dataclass 中，保持与仓库其他算法一致的入口风格。",
+        list: ["sequence_length 控制真实序列长度。", "imagination_horizon 控制模型内滚动长度。", "continuous 布尔值位于训练入口。"],
+        source: "Config"
+      },
+      replay: {
+        file: "Dreamer/replaybuffer.py · SequenceReplayBuffer.sample",
+        title: "只采样连续 episode 片段",
+        text: "回放按 episode 保存，随机截取后把首帧重新设为递归起点，避免读取片段外隐藏状态。",
+        list: ["图像只存一次 uint8。", "首帧动作和奖励清零。", "terminated 与 truncated 都不会跨越。"],
+        source: "SequenceReplayBuffer.sample()"
+      },
+      rssm: {
+        file: "Dreamer/dreamerv2.py · RSSM._sample",
+        title: "直通离散采样",
+        text: "前向使用 one-hot，反向把梯度交给类别概率。该状态随后与 GRU 确定状态拼接成模型特征。",
+        list: ["sample=True：训练时随机采样。", "sample=False：评估时选择最大概率类别。", "每个随机变量有 stoch_classes 个类别。"],
+        source: "RSSM._sample()"
+      },
+      world: {
+        file: "Dreamer/dreamerv2.py · WorldModel._kl_loss",
+        title: "KL balance",
+        text: "停止不同一侧的梯度，可以分别控制后验正则与先验拟合。默认 0.8 权重用于训练先验。",
+        list: ["posterior_kl 只更新后验。", "prior_kl 只更新先验。", "free_nats 避免过度压缩潜状态。"],
+        source: "WorldModel._kl_loss()"
+      },
+      agent: {
+        file: "Dreamer/dreamerv2.py · DreamerV2Agent._imagine",
+        title: "从后验状态开始想象",
+        text: "想象阶段不再编码真实图像。Actor 给动作，RSSM 先验生成下一状态，预测头给奖励与继续概率。",
+        list: ["feature 长度为 H+1。", "奖励和折扣长度为 H。", "λ-return 对齐当前动作。"],
+        source: "DreamerV2Agent._imagine()"
+      },
+      entry: {
+        file: "Dreamer/dreamerv2.py · __main__",
+        title: "保持单脚本入口",
+        text: "update 控制训练或评估，continuous 控制 Box 或 Discrete CarRacing。模型名称自动包含动作类型。",
+        list: ["训练会尝试加载 last。", "评估优先加载 best。", "环境结束后显式 close。"],
+        source: "if __name__ == '__main__'"
+      }
+    };
+
+    const codeView = document.querySelector("#code-view");
+    const codeFile = document.querySelector("#code-file");
+    const annotationTitle = document.querySelector("#annotation-title");
+    const annotationText = document.querySelector("#annotation-text");
+    const annotationList = document.querySelector("#annotation-list");
+    const annotationSource = document.querySelector("#annotation-source");
+
+    function selectCode(name) {
+      const template = document.querySelector(`#code-${name}`);
+      const meta = codeMeta[name];
+      codeView.textContent = template.content.textContent.trim();
+      codeFile.textContent = meta.file;
+      annotationTitle.textContent = meta.title;
+      annotationText.textContent = meta.text;
+      annotationList.replaceChildren(...meta.list.map(text => {
+        const item = document.createElement("li");
+        item.textContent = text;
+        return item;
+      }));
+      annotationSource.textContent = meta.source;
+      document.querySelectorAll("[data-code]").forEach(button => {
+        button.classList.toggle("active", button.dataset.code === name);
+      });
+    }
+
+    document.querySelectorAll("[data-code]").forEach(button => {
+      button.addEventListener("click", () => selectCode(button.dataset.code));
+    });
+    selectCode("rssm");
+
+    async function copyText(text, button) {
+      try {
+        await navigator.clipboard.writeText(text);
+        const old = button.textContent;
+        button.textContent = "已复制";
+        setTimeout(() => { button.textContent = old; }, 1200);
+      } catch (_) {
+        button.textContent = "复制失败";
+      }
+    }
+
+    document.querySelector("#copy-code").addEventListener("click", event => {
+      copyText(codeView.textContent, event.currentTarget);
+    });
+    document.querySelectorAll("[data-copy]").forEach(button => {
+      button.addEventListener("click", () => copyText(button.dataset.copy, button));
+    });
+
+    const modelSection = document.querySelector("#model");
+    document.querySelectorAll("[data-mode]").forEach(button => {
+      button.addEventListener("click", () => {
+        const imagine = button.dataset.mode === "imagine";
+        modelSection.classList.toggle("mode-imagine", imagine);
+        modelSection.classList.toggle("mode-observe", !imagine);
+        document.querySelectorAll("[data-mode]").forEach(item => {
+          const active = item === button;
+          item.classList.toggle("active", active);
+          item.setAttribute("aria-selected", String(active));
+        });
+      });
+    });
+
+    const navLinks = [...document.querySelectorAll(".topnav a")];
+    const sections = [...document.querySelectorAll("[data-section]")];
+    const observer = new IntersectionObserver(entries => {
+      const visible = entries
+        .filter(entry => entry.isIntersecting)
+        .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+      if (!visible) return;
+      const name = visible.target.dataset.section;
+      navLinks.forEach(link => {
+        link.classList.toggle("active", link.getAttribute("href") === `#${name}`);
+      });
+    }, { rootMargin: "-25% 0px -60%", threshold: [0.05, 0.25, 0.5] });
+    sections.forEach(section => observer.observe(section));
+  </script>
+</body>
+</html>

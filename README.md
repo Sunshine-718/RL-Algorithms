@@ -19,6 +19,7 @@
 
 ### 3. 其他算法
 - DDPG (Deep Deterministic Policy Gradient)
+- Dreamer V2（离散世界模型与潜空间想象）
 - SAC (Soft Actor-Critic)
 - TD3 (Twin Delayed DDPG)
 
@@ -28,6 +29,7 @@
 RL-Algorithms/
 ├── DDPG/          # DDPG算法实现
 ├── DQN/           # DQN系列算法
+├── Dreamer/       # Dreamer V2与中文教学页
 ├── PPO/           # PPO系列算法
 ├── SAC/           # SAC算法
 ├── TD3/           # TD3算法
@@ -59,6 +61,18 @@ pip install -r requirements.txt
 # 示例：运行DQN
 python DQN/dqn.py
 ```
+
+Dreamer V2 默认训练连续动作的 CarRacing-v3。编辑脚本底部的
+`update` 与 `continuous` 可切换训练/评估及连续/离散动作：
+
+教学实现固定接收包装器输出的 `uint8 [2, 96, 96]` CHW 图像。
+
+```bash
+python Dreamer/dreamerv2.py
+```
+
+完整原理、数据流和源码导读见
+[`Dreamer/dreamerv2_tutorial.html`](Dreamer/dreamerv2_tutorial.html)。
 
 可键盘控制的 BipedalWalker 训练与操作说明见
 [`SAC/COMMAND_BIPEDAL.md`](SAC/COMMAND_BIPEDAL.md)。
