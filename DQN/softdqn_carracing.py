@@ -214,7 +214,7 @@ class CarRacingSoftDQNAgent(DQNAgentBase):
 
 
 if __name__ == "__main__":
-    update = 1
+    update = 0
     device = "cuda" if torch.cuda.is_available() else "cpu"
     num_envs = 4 if bool(update) else 1
     env = make_carracing_env(update, num_envs)
@@ -234,8 +234,7 @@ if __name__ == "__main__":
     agent = CarRacingSoftDQNAgent(
         "softdqn_carracing", q_network, config
     )
-    if not bool(update):
-        agent.load()
+    agent.load()
 
     reward_container = []
     max_steps = 1_000

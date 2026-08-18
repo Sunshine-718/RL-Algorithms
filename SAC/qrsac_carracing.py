@@ -37,9 +37,9 @@ class Config:
     discount: float = 0.99
     params: str = "./params"
     tau: float = 3e-2
-    capacity: int = 100_000
+    capacity: int = 1_000_000
     epoch: int = 10
-    reward_scale: float = 1.0
+    reward_scale: float = 5.0
     n_step: int = 5
     actor_quantile_fraction: float = 1.0
 
@@ -413,7 +413,7 @@ class CarRacingQRSACAgent(AgentBase):
 
 
 if __name__ == "__main__":
-    update = 1
+    update = 0
     device = "cuda" if torch.cuda.is_available() else "cpu"
     num_envs = 4 if bool(update) else 1
     env = make_carracing_env(
@@ -445,8 +445,7 @@ if __name__ == "__main__":
     agent = CarRacingQRSACAgent(
         "qrsac_carracing", network, config
     )
-    if not bool(update):
-        agent.load()
+    agent.load()
 
     reward_container = []
     max_steps = 1_000
