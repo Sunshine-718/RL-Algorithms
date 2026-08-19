@@ -17,6 +17,7 @@ class FireReset(gym.Wrapper):
         if "FIRE" not in action_meanings:
             raise ValueError("environment does not provide a FIRE action")
         self.fire_action = action_meanings.index("FIRE")
+        self.lives = 0
 
     def reset(self, **kwargs):
         observation, info = self.env.reset(**kwargs)
@@ -28,7 +29,47 @@ class FireReset(gym.Wrapper):
         else:
             info = dict(info)
             info.update(step_info)
+        self.lives = self.unwrapped.ale.lives()
         return observation, info
+
+    def step(self, action):
+        observation, reward, terminated, truncated, info = self.env.step(
+            action
+        )
+        lives = self.unwrapped.ale.lives()
+        life_lost = lives < self.lives
+        auto_fire = (
+            life_lost
+            and lives > 0
+            and not terminated
+            and not truncated
+        )
+
+        if auto_fire:
+            (
+                fire_observation,
+                fire_reward,
+                fire_terminated,
+                fire_truncated,
+                fire_info,
+            ) = self.env.step(self.fire_action)
+            observation = fire_observation
+            reward = float(reward) + float(fire_reward)
+            terminated = terminated or fire_terminated
+            truncated = truncated or fire_truncated
+            info = dict(info)
+            info.update(fire_info)
+            lives = self.unwrapped.ale.lives()
+
+        info = dict(info)
+        info.update(
+            {
+                "life_lost": life_lost,
+                "auto_fire": auto_fire,
+            }
+        )
+        self.lives = lives
+        return observation, reward, terminated, truncated, info
 
 
 def wrap_breakout_observation(env):
