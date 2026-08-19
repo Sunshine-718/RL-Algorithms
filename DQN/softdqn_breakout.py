@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributions import Categorical
 from tqdm.auto import tqdm
 
@@ -22,9 +23,8 @@ from common import (
     reset_done_envs,
     reset_env,
     single_spaces,
-    store_n_step_transition,
     step_env,
-    weighted_quantile_huber_loss,
+    store_n_step_transition,
 )
 from image_replaybuffer import ImageReplayBuffer
 
@@ -45,19 +45,15 @@ class Config:
     alpha_max: float = 1.0
 
 
-class BreakoutQRDuelingNetwork(NNBase):
-    def __init__(self, lr, num_actions, num_quantiles=51,
-                 computes_grad=True, device="cpu"):
+class BreakoutDuelingNetwork(NNBase):
+    def __init__(self, lr, num_actions, computes_grad=True, device="cpu"):
         super().__init__()
         self.features = nn.Sequential(
             nn.Conv2d(OBSERVATION_SHAPE[0], 32, kernel_size=8, stride=4),
-            # nn.BatchNorm2d(32),
             nn.SiLU(inplace=True),
             nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            # nn.BatchNorm2d(64),
             nn.SiLU(inplace=True),
             nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            # nn.BatchNorm2d(64),
             nn.SiLU(inplace=True),
             nn.Flatten(),
         )
@@ -66,10 +62,9 @@ class BreakoutQRDuelingNetwork(NNBase):
             nn.Linear(self.feature_dim, 512),
             nn.SiLU(inplace=True),
         )
-        self.value = nn.Linear(512, num_quantiles)
-        self.advantage = nn.Linear(512, num_actions * num_quantiles)
+        self.value = nn.Linear(512, 1)
+        self.advantage = nn.Linear(512, num_actions)
         self.action_dim = num_actions
-        self.num_quantiles = num_quantiles
         self.obs_shape = OBSERVATION_SHAPE
         self.device = torch.device(device)
 
@@ -92,9 +87,6 @@ class BreakoutQRDuelingNetwork(NNBase):
             nn.init.kaiming_normal_(module.weight)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.BatchNorm2d):
-            nn.init.ones_(module.weight)
-            nn.init.zeros_(module.bias)
 
     def forward(self, state):
         if state.ndim == len(self.obs_shape):
@@ -109,18 +101,13 @@ class BreakoutQRDuelingNetwork(NNBase):
         else:
             state = state.to(dtype=torch.float32)
 
-        batch_size = state.shape[0]
         hidden = self.hidden(self.features(state))
-        value = self.value(hidden).view(
-            batch_size, 1, self.num_quantiles
-        )
-        advantage = self.advantage(hidden).view(
-            batch_size, self.action_dim, self.num_quantiles
-        )
+        value = self.value(hidden)
+        advantage = self.advantage(hidden)
         return value + advantage - advantage.mean(dim=1, keepdim=True)
 
 
-class BreakoutSoftQRDQNAgent(SoftDQNAgentBase):
+class BreakoutSoftDQNAgent(SoftDQNAgentBase):
     def __init__(self, name, q_network, config):
         self.net = q_network
         self.target_net = deepcopy(q_network)
@@ -151,12 +138,6 @@ class BreakoutSoftQRDQNAgent(SoftDQNAgentBase):
             lr=0.1,
         )
         self.target_entropy = float(np.log(q_network.action_dim)) * 0.45
-        self.qr_tau = torch.linspace(
-            0.5 / q_network.num_quantiles,
-            1.0 - 0.5 / q_network.num_quantiles,
-            q_network.num_quantiles,
-            device=q_network.device,
-        ).view(1, -1)
         self.soft_update(tau=1.0)
 
     @torch.no_grad()
@@ -167,63 +148,46 @@ class BreakoutSoftQRDQNAgent(SoftDQNAgentBase):
         if single_state:
             state_tensor = state_tensor.unsqueeze(0)
 
+        training = self.net.training
         self.net.eval()
-        q_value = self.net(state_tensor).mean(dim=-1).cpu()
+        q_value = self.net(state_tensor).cpu()
         if deterministic:
             actions = q_value.argmax(dim=-1).numpy()
         else:
             probabilities = torch.softmax(q_value / self.alpha, dim=-1)
             actions = Categorical(probabilities).sample().numpy()
-        self.net.train()
+        self.net.train(training)
         return int(actions[0]) if single_state else actions
 
     @torch.no_grad()
     def td_target(self, reward, next_state, terminated, n):
         training = self.net.training
         self.net.eval()
-        online_quantiles = self.net(next_state)
+        online_q = self.net(next_state)
         self.net.train(training)
-        target_quantiles = self.target_net(next_state)
+        target_q = self.target_net(next_state)
         log_probabilities = torch.log_softmax(
-            online_quantiles.mean(dim=-1) / self.alpha,
+            online_q / self.alpha,
             dim=1,
         )
         probabilities = log_probabilities.exp()
-        soft_target_atoms = (
-            target_quantiles
-            - self.alpha * log_probabilities.unsqueeze(-1)
+        soft_value = (
+            probabilities
+            * (target_q - self.alpha * log_probabilities)
+        ).sum(dim=1, keepdim=True)
+        return (
+            reward
+            + torch.pow(self.discount, n)
+            * soft_value
+            * (1.0 - terminated)
         )
-        target_atoms = (
-            reward.unsqueeze(-1)
-            + torch.pow(self.discount, n).unsqueeze(-1)
-            * soft_target_atoms
-            * (1.0 - terminated).unsqueeze(-1)
-        )
-        atom_weights = probabilities.unsqueeze(-1).expand_as(
-            target_quantiles
-        ) / self.net.num_quantiles
-        return target_atoms.flatten(1), atom_weights.flatten(1)
 
     def loss(self, state, action, reward, next_state, terminated, truncated,
              n):
-        batch_size = state.shape[0]
-        quantiles = self.net(state)
-        action = action.view(batch_size, 1, 1).expand(
-            batch_size, 1, self.net.num_quantiles
-        )
-        chosen_quantiles = quantiles.gather(
-            1, action.long()
-        ).squeeze(1)
-        target_quantiles, target_weights = self.td_target(
-            reward, next_state, terminated, n
-        )
-        loss = weighted_quantile_huber_loss(
-            chosen_quantiles,
-            target_quantiles,
-            target_weights,
-            self.qr_tau,
-        )
-        return loss, quantiles.detach()
+        q_values = self.net(state)
+        chosen_q = q_values.gather(1, action.long())
+        target = self.td_target(reward, next_state, terminated, n)
+        return F.smooth_l1_loss(chosen_q, target), q_values.detach()
 
     def step(self, batch_size=128):
         if len(self.buffer) < max(batch_size, self.learning_starts):
@@ -233,12 +197,12 @@ class BreakoutSoftQRDQNAgent(SoftDQNAgentBase):
             self.net.opt.zero_grad()
             self.target_net.eval()
             self.net.train()
-            loss, quantiles = self.loss(*self.buffer.sample(batch_size))
+            loss, q_values = self.loss(*self.buffer.sample(batch_size))
             loss.backward()
             nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
             self.net.opt.step()
 
-            self._update_alpha(quantiles)
+            self._update_alpha(q_values)
             self.soft_update()
 
         return {"loss": loss.item(), "alpha": self.alpha}
@@ -262,16 +226,15 @@ if __name__ == "__main__":
             f"unexpected observation shape: {observation_space.shape}"
         )
 
-    q_network = BreakoutQRDuelingNetwork(
+    q_network = BreakoutDuelingNetwork(
         lr=1e-4,
         num_actions=action_space.n,
-        num_quantiles=51,
         computes_grad=True,
         device=device,
     )
     config = Config()
-    agent = BreakoutSoftQRDQNAgent(
-        "softqrdqn_breakout_v2", q_network, config
+    agent = BreakoutSoftDQNAgent(
+        "softdqn_breakout", q_network, config
     )
     agent.load(required=not bool(update))
 
