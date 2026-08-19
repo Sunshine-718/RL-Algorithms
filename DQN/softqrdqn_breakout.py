@@ -49,10 +49,13 @@ class BreakoutQRDuelingNetwork(NNBase):
         super().__init__()
         self.features = nn.Sequential(
             nn.Conv2d(OBSERVATION_SHAPE[0], 32, kernel_size=8, stride=4),
+            nn.BatchNorm2d(32),
             nn.SiLU(inplace=True),
             nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.BatchNorm2d(64),
             nn.SiLU(inplace=True),
             nn.Conv2d(64, 64, kernel_size=3, stride=1),
+            nn.BatchNorm2d(64),
             nn.SiLU(inplace=True),
             nn.Flatten(),
         )
@@ -74,8 +77,11 @@ class BreakoutQRDuelingNetwork(NNBase):
         self.to(self.device)
 
     def _feature_dim(self):
+        training = self.features.training
+        self.features.eval()
         with torch.no_grad():
             features = self.features(torch.zeros(1, *OBSERVATION_SHAPE))
+        self.features.train(training)
         return features.shape[1]
 
     @staticmethod
@@ -84,6 +90,9 @@ class BreakoutQRDuelingNetwork(NNBase):
             nn.init.orthogonal_(module.weight, gain=np.sqrt(2.0))
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.BatchNorm2d):
+            nn.init.ones_(module.weight)
+            nn.init.zeros_(module.bias)
 
     def forward(self, state):
         if state.ndim == len(self.obs_shape):
@@ -114,6 +123,7 @@ class BreakoutSoftQRDQNAgent(DQNAgentBase):
         self.net = q_network
         self.target_net = deepcopy(q_network)
         self.target_net.computes_grad(False)
+        self.target_net.eval()
         self.buffer = ImageReplayBuffer(
             q_network.obs_shape,
             config.capacity,
@@ -177,7 +187,10 @@ class BreakoutSoftQRDQNAgent(DQNAgentBase):
 
     @torch.no_grad()
     def td_target(self, reward, next_state, terminated, n):
+        training = self.net.training
+        self.net.eval()
         online_quantiles = self.net(next_state)
+        self.net.train(training)
         target_quantiles = self.target_net(next_state)
         next_quantiles = torch.minimum(
             online_quantiles, target_quantiles
@@ -238,6 +251,13 @@ class BreakoutSoftQRDQNAgent(DQNAgentBase):
             self.soft_update()
 
         return {"loss": loss.item(), "alpha": self.alpha}
+
+    def soft_update(self, tau=None):
+        super().soft_update(tau)
+        for target_buffer, buffer in zip(
+            self.target_net.buffers(), self.net.buffers()
+        ):
+            target_buffer.copy_(buffer)
 
 
 def store_n_step_transition(agent, transition_cache, force=False):
