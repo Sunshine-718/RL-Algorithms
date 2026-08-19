@@ -39,7 +39,7 @@ class Config:
     epoch: int = 30
     learning_starts: int = 20_000
     reward_scale: float = 1.0
-    n_step: int = 1
+    n_step: int = 5
     alpha: float = 0.1
 
 
