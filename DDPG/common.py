@@ -82,11 +82,18 @@ def flush_episode(agent, transitions):
 
 
 def quantile_huber_loss(pred, target, tau, kappa=1.0):
-    # pred: [B, N], target: [B, 1], tau: [1, N]
-    error = pred.unsqueeze(2) - target.expand_as(pred).unsqueeze(1)  # [B, N, N]
-    huber = torch.where(error.abs() <= kappa, 0.5 * error.pow(2), kappa * (error.abs() - 0.5 * kappa))
-    loss = torch.abs(tau.unsqueeze(-1) - (error.detach() < 0).float()) * huber  # [B, N, N]
-    return loss.mean()
+    """Pairwise quantile Huber loss for prediction and target distributions."""
+    td_error = target.unsqueeze(1) - pred.unsqueeze(2)
+    abs_error = td_error.abs()
+    huber = torch.where(
+        abs_error <= kappa,
+        0.5 * td_error.pow(2),
+        kappa * (abs_error - 0.5 * kappa),
+    )
+    weight = torch.abs(
+        tau.unsqueeze(-1) - (td_error.detach() < 0).float()
+    )
+    return (weight * huber).mean()
 
 
 class GLU(nn.Module):
