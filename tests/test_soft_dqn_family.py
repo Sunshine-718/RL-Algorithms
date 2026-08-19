@@ -13,7 +13,7 @@ DQN_ROOT = Path(__file__).resolve().parents[1] / "DQN"
 if str(DQN_ROOT) not in sys.path:
     sys.path.insert(0, str(DQN_ROOT))
 
-from common import NNBase, SoftDQNAgentBase
+from common import NNBase, SoftDQNAgentBase, discrete_temperature_loss
 from softdqn import Config as SoftDQNConfig
 from softdqn import SoftDQNAgent
 from softdqn_carracing import CarRacingSoftDQNAgent
@@ -239,27 +239,69 @@ class SoftDQNFamilyTest(unittest.TestCase):
             all(param.grad is None for param in agent.target_net.parameters())
         )
 
-    def test_shared_alpha_recovers_from_both_bounds(self):
+    def test_temperature_gradient_is_independent_of_alpha_scale(self):
+        probabilities = torch.tensor([[0.25, 0.25, 0.25, 0.25]])
+        log_probabilities = probabilities.log()
+        target_entropy = math.log(4) * 0.45
+
+        def gradient(initial_alpha):
+            log_alpha = torch.nn.Parameter(
+                torch.tensor([math.log(initial_alpha)])
+            )
+            loss = discrete_temperature_loss(
+                log_alpha,
+                log_probabilities,
+                probabilities,
+                target_entropy,
+            )
+            loss.backward()
+            return float(log_alpha.grad.item())
+
+        small_gradient = gradient(0.2)
+        large_gradient = gradient(200.0)
+        self.assertGreater(small_gradient, 0.0)
+        self.assertAlmostEqual(small_gradient, large_gradient, places=6)
+
+        peaked = torch.tensor([[0.97, 0.01, 0.01, 0.01]])
+        log_alpha = torch.nn.Parameter(torch.tensor([math.log(0.2)]))
+        loss = discrete_temperature_loss(
+            log_alpha,
+            peaked.log(),
+            peaked,
+            target_entropy,
+        )
+        loss.backward()
+        self.assertLess(float(log_alpha.grad.item()), 0.0)
+
+    def test_shared_alpha_is_uncapped_and_self_correcting(self):
         agents = [*scalar_agent_cases(), make_qr_agent(), make_iqn_agent()]
 
         for agent in agents:
             with self.subTest(agent=type(agent).__name__):
                 self.assertIsInstance(agent, SoftDQNAgentBase)
                 alpha_parameter = agent._alpha
+                self.assertAlmostEqual(
+                    agent.alpha_opt.param_groups[0]["lr"], 1e-2
+                )
 
-                with torch.no_grad():
-                    agent._alpha.fill_(math.log(2.0))
+                agent.alpha = 2.5
+                self.assertAlmostEqual(agent.alpha, 2.5, places=5)
+                high_entropy_alpha = agent.alpha
+                log_alpha_before = float(agent._alpha.detach().item())
                 agent._update_alpha(torch.zeros(8, agent.n_actions))
-                self.assertGreaterEqual(agent.alpha, agent.alpha_min)
-                self.assertLess(agent.alpha, agent.alpha_max)
+                self.assertLess(agent.alpha, high_entropy_alpha)
+                self.assertGreater(agent.alpha, 1.0)
+                self.assertLessEqual(
+                    abs(float(agent._alpha.detach().item()) - log_alpha_before),
+                    1e-3 + 1e-7,
+                )
 
-                with torch.no_grad():
-                    agent._alpha.fill_(math.log(0.005))
+                agent.alpha = 1e-8
                 peaked = torch.full((8, agent.n_actions), -20.0)
                 peaked[:, 0] = 20.0
+                low_entropy_alpha = agent.alpha
                 agent._update_alpha(peaked)
-                self.assertGreater(agent.alpha, agent.alpha_min)
-                self.assertLessEqual(agent.alpha, agent.alpha_max)
+                self.assertGreater(agent.alpha, low_entropy_alpha)
 
                 agent.alpha = 0.2
                 self.assertIs(agent._alpha, alpha_parameter)
@@ -268,7 +310,7 @@ class SoftDQNFamilyTest(unittest.TestCase):
                     alpha_parameter,
                 )
 
-    def test_shared_alpha_checkpoint_projection_and_validation(self):
+    def test_shared_alpha_checkpoint_is_uncapped_and_validated(self):
         def checkpoint_agent(directory):
             return SoftDQNAgent(
                 "softdqn_alpha_test",
@@ -284,14 +326,13 @@ class SoftDQNFamilyTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             writer = checkpoint_agent(directory)
-            with torch.no_grad():
-                writer._alpha.fill_(math.log(1e-8))
+            writer.alpha = 2.5
             writer.save()
 
             restored = checkpoint_agent(directory)
             alpha_parameter = restored._alpha
             self.assertTrue(restored.load(required=True))
-            self.assertEqual(restored.alpha, restored.alpha_min)
+            self.assertAlmostEqual(restored.alpha, 2.5, places=5)
             self.assertIs(restored._alpha, alpha_parameter)
             self.assertIs(
                 restored.alpha_opt.param_groups[0]["params"][0],
@@ -304,6 +345,13 @@ class SoftDQNFamilyTest(unittest.TestCase):
             invalid = checkpoint_agent(directory)
             with self.assertRaisesRegex(ValueError, "log_alpha must be finite"):
                 invalid.load("nan", required=True)
+            self.assertAlmostEqual(invalid.alpha, 0.2)
+
+            with self.assertRaisesRegex(
+                ValueError, "alpha must fit its parameter dtype"
+            ):
+                invalid.alpha = 1e-300
+            self.assertAlmostEqual(invalid.alpha, 0.2)
 
             legacy_path = (
                 Path(directory) / "softdqn_alpha_test_legacy.pt"
@@ -339,9 +387,90 @@ class SoftDQNFamilyTest(unittest.TestCase):
 
                 agent.soft_update = count_soft_update
                 result = agent.step(batch_size=2)
-                loss = result["loss"] if isinstance(result, dict) else result
+                metrics = agent.last_training_metrics
                 self.assertEqual(soft_update_calls, agent.epoch)
-                self.assertTrue(np.isfinite(loss))
+                self.assertEqual(
+                    set(metrics),
+                    {
+                        "updated",
+                        "loss",
+                        "alpha",
+                        "entropy",
+                        "target_entropy",
+                        "buffer_size",
+                        "buffer_capacity",
+                    },
+                )
+                self.assertTrue(metrics["updated"])
+                self.assertTrue(np.isfinite(metrics["loss"]))
+                self.assertTrue(np.isfinite(metrics["alpha"]))
+                self.assertTrue(np.isfinite(metrics["entropy"]))
+                self.assertEqual(metrics["buffer_size"], 2)
+                if isinstance(agent, SoftIQNAgent):
+                    self.assertIsInstance(result, float)
+                elif isinstance(agent, CarRacingSoftDQNAgent):
+                    self.assertEqual(set(result), {"loss", "alpha"})
+                else:
+                    self.assertEqual(set(result), {"loss"})
+
+    def test_warmup_metrics_report_replay_state(self):
+        agent = make_qr_agent()
+        result = agent.step(batch_size=2)
+        metrics = agent.last_training_metrics
+        self.assertEqual(result, {})
+        self.assertFalse(metrics["updated"])
+        self.assertIsNone(metrics["loss"])
+        self.assertIsNone(metrics["entropy"])
+        self.assertEqual(metrics["buffer_size"], 0)
+        self.assertEqual(metrics["buffer_capacity"], 4)
+        description = agent.format_training_metrics(metrics)
+        self.assertIn("loss: n/a", description)
+        self.assertIn("H: n/a/", description)
+        self.assertIn("replay: 0/4", description)
+
+    def test_numerical_alpha_range_keeps_soft_targets_finite(self):
+        agent = scalar_agent_cases()[0]
+        reward = torch.zeros(1, 1)
+        next_state = torch.zeros(1, 1)
+        terminated = torch.zeros(1, 1)
+        horizon = torch.ones(1, 1, dtype=torch.int64)
+
+        for log_alpha in (-20.0, 20.0):
+            with self.subTest(log_alpha=log_alpha):
+                agent.alpha = math.exp(log_alpha)
+                target = agent.td_target(
+                    reward, next_state, terminated, horizon
+                )
+                self.assertTrue(torch.isfinite(target).all())
+
+        previous_alpha = agent.alpha
+        for invalid_alpha in (1e-12, 1e10):
+            with self.subTest(invalid_alpha=invalid_alpha):
+                with self.assertRaisesRegex(
+                    ValueError, "numerical safety range"
+                ):
+                    agent.alpha = invalid_alpha
+                self.assertEqual(agent.alpha, previous_alpha)
+
+    def test_nonfinite_temperature_update_keeps_last_valid_alpha(self):
+        agent = make_qr_agent()
+        previous_alpha = agent.alpha
+        with self.assertRaisesRegex(
+            FloatingPointError, "alpha loss must be finite"
+        ):
+            agent._update_alpha(
+                torch.full((2, agent.n_actions), float("nan"))
+            )
+        self.assertEqual(agent.alpha, previous_alpha)
+
+        def corrupt_temperature():
+            with torch.no_grad():
+                agent._alpha.fill_(float("inf"))
+
+        agent.alpha_opt.step = corrupt_temperature
+        with self.assertRaisesRegex(ValueError, "log_alpha must be finite"):
+            agent._update_alpha(torch.zeros(2, agent.n_actions))
+        self.assertEqual(agent.alpha, previous_alpha)
 
 
 if __name__ == "__main__":

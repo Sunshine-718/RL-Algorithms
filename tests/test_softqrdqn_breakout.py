@@ -106,25 +106,27 @@ class BreakoutSoftQRDQNTest(unittest.TestCase):
         weighted_loss.backward()
         self.assertTrue(torch.isfinite(pred.grad).all())
 
-    def test_alpha_recovers_at_both_bounds_without_changing_schedule(self):
+    def test_alpha_is_uncapped_without_changing_schedule(self):
         agent = make_agent(torch.zeros(4, 2), epoch=3)
+        self.assertAlmostEqual(
+            agent.alpha_opt.param_groups[0]["lr"], 1e-2
+        )
         alpha_parameter = agent._alpha
 
-        with torch.no_grad():
-            agent._alpha.fill_(math.log(2.0))
+        agent.alpha = 2.5
+        high_entropy_alpha = agent.alpha
         agent._update_alpha(torch.zeros(8, 4, 2))
-        self.assertGreaterEqual(agent.alpha, agent.alpha_min)
-        self.assertLess(agent.alpha, agent.alpha_max)
+        self.assertLess(agent.alpha, high_entropy_alpha)
+        self.assertGreater(agent.alpha, 1.0)
 
-        with torch.no_grad():
-            agent._alpha.fill_(math.log(0.005))
+        agent.alpha = 1e-8
         peaked = torch.tensor(
             [[[20.0, 20.0], [-20.0, -20.0],
               [-20.0, -20.0], [-20.0, -20.0]]]
         ).expand(8, -1, -1)
+        low_entropy_alpha = agent.alpha
         agent._update_alpha(peaked)
-        self.assertGreater(agent.alpha, agent.alpha_min)
-        self.assertLessEqual(agent.alpha, agent.alpha_max)
+        self.assertGreater(agent.alpha, low_entropy_alpha)
         self.assertIs(agent._alpha, alpha_parameter)
         self.assertIs(
             agent.alpha_opt.param_groups[0]["params"][0],
@@ -146,6 +148,9 @@ class BreakoutSoftQRDQNTest(unittest.TestCase):
         metrics = agent.step(batch_size=2)
         self.assertEqual(soft_update_calls, 3)
         self.assertTrue(np.isfinite(metrics["loss"]))
+        self.assertTrue(
+            np.isfinite(agent.last_training_metrics["entropy"])
+        )
 
 
 if __name__ == "__main__":

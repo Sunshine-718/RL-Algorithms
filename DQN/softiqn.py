@@ -28,8 +28,7 @@ class Config:
     reward_scale: float = 1.
     n_step: int = 5
     alpha: float = 0.1
-    alpha_min: float = 0.05
-    alpha_max: float = 1.0
+    alpha_lr: float = 1e-2
 
 
 class DuelingIQN(NNBase):
@@ -86,9 +85,7 @@ class SoftIQNAgent(SoftDQNAgentBase):
         self.reward_scale = config.reward_scale
         self._n_step = config.n_step
         self.tau = config.tau
-        self.configure_alpha(
-            config.alpha, config.alpha_min, config.alpha_max
-        )
+        self.configure_alpha(config.alpha, lr=config.alpha_lr)
         self.target_entropy = float(np.log(Q.action_dim)) * 0.45
         self.soft_update(tau=1)
 
@@ -165,7 +162,6 @@ class SoftIQNAgent(SoftDQNAgentBase):
         return loss, value.detach().mean(dim=-1)
 
     def step(self, batch_size=128):
-        loss = None
         if batch_size <= len(self.buffer):
             for _ in range(self.epoch):
                 self.net.opt.zero_grad()
@@ -175,9 +171,12 @@ class SoftIQNAgent(SoftDQNAgentBase):
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.net.opt.step()
-                self._update_alpha(q)
+                entropy = self._update_alpha(q)
                 self.soft_update()
-        return loss.item() if loss is not None else None
+            metrics = self.training_metrics(loss, entropy)
+            return metrics["loss"]
+        self.training_metrics()
+        return None
 
 
 if __name__ == "__main__":
@@ -193,9 +192,10 @@ if __name__ == "__main__":
                        if bool(update) else env.theta_threshold_radians)
     Q = DuelingIQN(1e-3, obs_dim, 128, action_dim, 0., True, device)
     config = Config()
-    agent = SoftIQNAgent('cartpole_softiqn_v2', Q, config)
+    agent = SoftIQNAgent('cartpole_softiqn_v3', Q, config)
     agent.load(required=not bool(update))
     agent.n_step = 5
+    training_metrics = agent.training_metrics()
     reward_container = []
     Loss = []
     td_error = []
@@ -237,6 +237,9 @@ if __name__ == "__main__":
                 flush_episode(agent, episode_caches[env_id])
                 if completed_episodes != 0:
                     agent.step()
+                    training_metrics = agent.last_training_metrics
+                else:
+                    training_metrics = agent.training_metrics()
             i = completed_episodes
             episode_reward_sum = float(episode_rewards[env_id])
             j = int(episode_lengths[env_id])
@@ -255,8 +258,17 @@ if __name__ == "__main__":
                 res = np.mean(avg)
                 if res > best_avg:
                     best_avg = res
+            training_status = (
+                f", {agent.format_training_metrics(training_metrics)}"
+                if bool(update) else ""
+            )
             iterator.set_description(
-                f'episode reward: {episode_reward_sum: .0f}, avg: {res: .0f}, best avg: {best_avg: .0f}, episode_length: {j}, avg step reward: {episode_reward_sum / j: .3f}')
+                f'episode reward: {episode_reward_sum: .0f}, '
+                f'avg: {res: .0f}, best avg: {best_avg: .0f}, '
+                f'episode_length: {j}, '
+                f'avg step reward: {episode_reward_sum / j: .3f}'
+                f'{training_status}'
+            )
             iterator.update(1)
             completed_episodes += 1
             episode_rewards[env_id] = 0

@@ -2,10 +2,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import NAdam, SGD
-from torch.distributions import Categorical
 import gymnasium as gym
 import numpy as np
 from pathlib import Path
+
+
+LOG_ALPHA_MIN = -20.0
+LOG_ALPHA_MAX = 20.0
 
 
 def _unwrap_env(env):
@@ -106,6 +109,15 @@ def store_n_step_transition(agent, transition_cache, force=False):
     )
     transition_cache.pop(0)
     return True
+
+
+def discrete_temperature_loss(
+    log_alpha, log_probabilities, probabilities, target_entropy
+):
+    entropy_error = (log_probabilities + target_entropy).detach()
+    return -(
+        probabilities.detach() * log_alpha * entropy_error
+    ).sum(dim=-1).mean()
 
 
 def quantile_huber_loss(pred, target, tau, kappa=1.0):
@@ -291,17 +303,7 @@ class DQNAgentBase:
 
 
 class SoftDQNAgentBase(DQNAgentBase):
-    def configure_alpha(self, initial_alpha, alpha_min=0.05, alpha_max=1.0,
-                        lr=0.1):
-        self.alpha_min = float(alpha_min)
-        self.alpha_max = float(alpha_max)
-        if not (
-            np.isfinite(self.alpha_min)
-            and np.isfinite(self.alpha_max)
-            and 0.0 < self.alpha_min <= self.alpha_max
-        ):
-            raise ValueError("alpha bounds must satisfy 0 < min <= max")
-
+    def configure_alpha(self, initial_alpha, *, lr=1e-2):
         initial_alpha = float(initial_alpha)
         if not np.isfinite(initial_alpha) or initial_alpha <= 0.0:
             raise ValueError("alpha must be finite and positive")
@@ -312,36 +314,66 @@ class SoftDQNAgentBase(DQNAgentBase):
         self._alpha = torch.tensor(
             [np.log(initial_alpha)], dtype=torch.float32, requires_grad=True
         )
-        self._project_alpha_()
+        self._validate_alpha_()
         self.alpha_opt = SGD([self._alpha], lr=lr)
         return self
 
     @property
     def alpha(self):
-        value = float(self._alpha.detach().exp().item())
-        return max(min(value, self.alpha_max), self.alpha_min)
+        self._validate_alpha_()
+        return float(self._alpha.detach().exp().item())
 
     @alpha.setter
     def alpha(self, value):
         value = float(value)
         if not np.isfinite(value) or value <= 0.0:
             raise ValueError("alpha must be finite and positive")
-        value = float(np.clip(value, self.alpha_min, self.alpha_max))
+        log_value = torch.tensor(
+            [np.log(value)], dtype=self._alpha.dtype,
+            device=self._alpha.device,
+        )
+        stored_value = log_value.exp()
+        if (
+            not torch.isfinite(log_value).all()
+            or not torch.isfinite(stored_value).all()
+            or not torch.all(stored_value > 0.0)
+        ):
+            raise ValueError("alpha must fit its parameter dtype")
+        if not torch.all(
+            (log_value >= LOG_ALPHA_MIN) & (log_value <= LOG_ALPHA_MAX)
+        ):
+            raise ValueError(
+                "log_alpha must stay within the numerical safety range "
+                f"[{LOG_ALPHA_MIN}, {LOG_ALPHA_MAX}]"
+            )
         with torch.no_grad():
-            self._alpha.fill_(np.log(value))
+            self._alpha.copy_(log_value)
 
     @torch.no_grad()
-    def _project_alpha_(self):
+    def _validate_alpha_(self):
         if not torch.isfinite(self._alpha).all():
             raise ValueError("log_alpha must be finite")
-        self._alpha.clamp_(
-            min=np.log(self.alpha_min),
-            max=np.log(self.alpha_max),
-        )
+        alpha = self._alpha.exp()
+        if not torch.isfinite(alpha).all() or not torch.all(alpha > 0.0):
+            raise ValueError("alpha must be finite and positive")
+        if not torch.all(
+            (self._alpha >= LOG_ALPHA_MIN)
+            & (self._alpha <= LOG_ALPHA_MAX)
+        ):
+            raise ValueError(
+                "log_alpha must stay within the numerical safety range "
+                f"[{LOG_ALPHA_MIN}, {LOG_ALPHA_MAX}]"
+            )
 
     def load(self, model='last', required=False):
-        loaded = super().load(model, required)
-        self._project_alpha_()
+        previous_alpha = self._alpha.detach().clone()
+        try:
+            loaded = super().load(model, required)
+            self._validate_alpha_()
+        except Exception:
+            with torch.no_grad():
+                self._alpha.copy_(previous_alpha)
+            raise
         return loaded
 
     def _update_alpha(self, q_values):
@@ -353,17 +385,71 @@ class SoftDQNAgentBase(DQNAgentBase):
                 "[batch, actions, quantiles]"
             )
 
-        self._project_alpha_()
+        self._validate_alpha_()
         q_values = q_values.detach().cpu()
-        probabilities = torch.softmax(q_values / self.alpha, dim=-1)
-        entropy = Categorical(probabilities).entropy().mean()
+        log_probabilities = torch.log_softmax(
+            q_values / self.alpha, dim=-1
+        )
+        probabilities = log_probabilities.exp()
+        entropy = -(
+            probabilities * log_probabilities
+        ).sum(dim=-1).mean()
 
         self.alpha_opt.zero_grad()
-        alpha_loss = self._alpha.exp() * (
-            entropy - self.target_entropy
-        ).detach()
+        alpha_loss = discrete_temperature_loss(
+            self._alpha,
+            log_probabilities,
+            probabilities,
+            self.target_entropy,
+        )
+        if not torch.isfinite(alpha_loss):
+            raise FloatingPointError("alpha loss must be finite")
         alpha_loss.backward()
-        nn.utils.clip_grad_norm_([self._alpha], 0.1)
+        grad_norm = nn.utils.clip_grad_norm_([self._alpha], 0.1)
+        if not torch.isfinite(grad_norm):
+            self.alpha_opt.zero_grad()
+            raise FloatingPointError("alpha gradient must be finite")
+        previous_alpha = self._alpha.detach().clone()
         self.alpha_opt.step()
-        self._project_alpha_()
+        try:
+            self._validate_alpha_()
+        except ValueError:
+            with torch.no_grad():
+                self._alpha.copy_(previous_alpha)
+            self.alpha_opt.zero_grad()
+            raise
         return entropy
+
+    def training_metrics(self, loss=None, entropy=None):
+        if isinstance(loss, torch.Tensor):
+            loss = float(loss.detach().item())
+        elif loss is not None:
+            loss = float(loss)
+        if isinstance(entropy, torch.Tensor):
+            entropy = float(entropy.detach().item())
+        elif entropy is not None:
+            entropy = float(entropy)
+        metrics = {
+            "updated": loss is not None,
+            "loss": loss,
+            "alpha": self.alpha,
+            "entropy": entropy,
+            "target_entropy": float(self.target_entropy),
+            "buffer_size": len(self.buffer),
+            "buffer_capacity": int(self.buffer.capacity),
+        }
+        self.last_training_metrics = metrics
+        return metrics
+
+    @staticmethod
+    def format_training_metrics(metrics):
+        loss = metrics["loss"]
+        entropy = metrics["entropy"]
+        loss_text = "n/a" if loss is None else f"{loss:.4f}"
+        entropy_text = "n/a" if entropy is None else f"{entropy:.3f}"
+        return (
+            f"loss: {loss_text}, alpha: {metrics['alpha']:.4f}, "
+            f"H: {entropy_text}/{metrics['target_entropy']:.3f}, "
+            f"replay: {metrics['buffer_size']:,}/"
+            f"{metrics['buffer_capacity']:,}"
+        )

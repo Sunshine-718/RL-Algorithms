@@ -16,7 +16,12 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from breakout_env import OBSERVATION_SHAPE, make_breakout_env
+from breakout_env import (
+    FRAME_SKIP,
+    OBSERVATION_SHAPE,
+    STACK_SIZE,
+    make_breakout_env,
+)
 from common import (
     NNBase,
     SoftDQNAgentBase,
@@ -41,8 +46,7 @@ class Config:
     reward_scale: float = 1.0
     n_step: int = 5
     alpha: float = 0.1
-    alpha_min: float = 0.05
-    alpha_max: float = 1.0
+    alpha_lr: float = 1e-2
 
 
 class BreakoutDuelingNetwork(NNBase):
@@ -131,12 +135,7 @@ class BreakoutSoftDQNAgent(SoftDQNAgentBase):
         self.reward_scale = config.reward_scale
         self._n_step = config.n_step
         self.tau = config.tau
-        self.configure_alpha(
-            config.alpha,
-            alpha_min=config.alpha_min,
-            alpha_max=config.alpha_max,
-            lr=0.1,
-        )
+        self.configure_alpha(config.alpha, lr=config.alpha_lr)
         self.target_entropy = float(np.log(q_network.action_dim)) * 0.45
         self.soft_update(tau=1.0)
 
@@ -191,6 +190,7 @@ class BreakoutSoftDQNAgent(SoftDQNAgentBase):
 
     def step(self, batch_size=128):
         if len(self.buffer) < max(batch_size, self.learning_starts):
+            self.training_metrics()
             return {}
 
         for _ in range(self.epoch):
@@ -202,10 +202,11 @@ class BreakoutSoftDQNAgent(SoftDQNAgentBase):
             nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
             self.net.opt.step()
 
-            self._update_alpha(q_values)
+            entropy = self._update_alpha(q_values)
             self.soft_update()
 
-        return {"loss": loss.item(), "alpha": self.alpha}
+        metrics = self.training_metrics(loss, entropy)
+        return {"loss": metrics["loss"], "alpha": metrics["alpha"]}
 
     def soft_update(self, tau=None):
         super().soft_update(tau)
@@ -226,17 +227,35 @@ if __name__ == "__main__":
             f"unexpected observation shape: {observation_space.shape}"
         )
 
+    learning_rate = 1e-4
     q_network = BreakoutDuelingNetwork(
-        lr=1e-4,
+        lr=learning_rate,
         num_actions=action_space.n,
         computes_grad=True,
         device=device,
     )
     config = Config()
+    agent_name = "softdqn_breakout_v2"
     agent = BreakoutSoftDQNAgent(
-        "softdqn_breakout", q_network, config
+        agent_name, q_network, config
     )
-    agent.load(required=not bool(update))
+    checkpoint_loaded = agent.load(required=not bool(update))
+    batch_size = 128
+    training_metrics = agent.training_metrics()
+    print(
+        f"model={agent_name}, checkpoint_loaded={checkpoint_loaded}, "
+        f"device={device}, envs={num_envs}, "
+        f"observation={observation_space.shape}, actions={action_space.n}, "
+        f"frame_skip={FRAME_SKIP}, stack_size={STACK_SIZE}, "
+        f"learning_rate={learning_rate}, "
+        f"capacity={config.capacity:,}, batch_size={batch_size}, "
+        f"learning_starts={config.learning_starts:,}, epoch={config.epoch}, "
+        f"n_step={config.n_step}, discount={config.discount}, "
+        f"reward_scale={config.reward_scale}, tau={config.tau}, "
+        f"alpha={agent.alpha:.4f}, "
+        f"alpha_lr={config.alpha_lr}, "
+        f"target_entropy={agent.target_entropy:.3f}"
+    )
 
     reward_container = []
     interval = 10
@@ -287,7 +306,8 @@ if __name__ == "__main__":
                     store_n_step_transition(
                         agent, episode_caches[env_id], force=True
                     )
-                agent.step()
+                agent.step(batch_size)
+                training_metrics = agent.last_training_metrics
 
             episode_index = completed_episodes
             episode_reward = float(episode_rewards[env_id])
@@ -310,11 +330,16 @@ if __name__ == "__main__":
                 plt.tight_layout()
                 plt.pause(0.1)
 
+            training_status = (
+                f", {agent.format_training_metrics(training_metrics)}"
+                if bool(update) else ""
+            )
             iterator.set_description(
                 f"episode reward: {episode_reward: .0f}, "
                 f"avg: {average_reward: .1f}, "
                 f"best avg: {best_average: .1f}, "
                 f"episode length: {episode_length}"
+                f"{training_status}"
             )
             iterator.update(1)
             completed_episodes += 1

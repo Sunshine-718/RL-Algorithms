@@ -191,6 +191,9 @@ class BreakoutSoftDQNTest(unittest.TestCase):
 
     def test_step_updates_target_once_per_epoch(self):
         agent = make_agent(epoch=3)
+        self.assertAlmostEqual(
+            agent.alpha_opt.param_groups[0]["lr"], 1e-2
+        )
         for index in range(2):
             state = np.asarray([index], dtype=np.uint8)
             agent.buffer.store(
@@ -225,11 +228,15 @@ class BreakoutSoftDQNTest(unittest.TestCase):
         agent._update_alpha = count_alpha_update
         agent.soft_update = count_soft_update
         result = agent.step(batch_size=2)
+        metrics = agent.last_training_metrics
 
         self.assertEqual(events, ["critic", "alpha", "target"] * 3)
         self.assertFalse(torch.equal(agent.target_net.values, target_before))
+        self.assertEqual(set(result), {"loss", "alpha"})
+        self.assertTrue(metrics["updated"])
         self.assertTrue(np.isfinite(result["loss"]))
         self.assertTrue(np.isfinite(result["alpha"]))
+        self.assertTrue(np.isfinite(metrics["entropy"]))
 
     def test_parallel_n_step_caches_do_not_mix(self):
         agent = make_agent(discount=0.5, n_step=2)
