@@ -111,6 +111,15 @@ def store_n_step_transition(agent, transition_cache, force=False):
     return True
 
 
+def flush_n_step_transitions(agent, transition_cache):
+    stored = 0
+    while transition_cache:
+        stored += int(
+            store_n_step_transition(agent, transition_cache, force=True)
+        )
+    return stored
+
+
 def discrete_temperature_loss(
     log_alpha, log_probabilities, probabilities, target_entropy
 ):

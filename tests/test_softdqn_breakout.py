@@ -17,7 +17,11 @@ if str(DQN_ROOT) not in sys.path:
     sys.path.insert(0, str(DQN_ROOT))
 
 import breakout_env
-from common import NNBase, store_n_step_transition
+from common import (
+    NNBase,
+    flush_n_step_transitions,
+    store_n_step_transition,
+)
 from softdqn_breakout import (
     BreakoutDuelingNetwork,
     BreakoutSoftDQNAgent,
@@ -39,6 +43,53 @@ class TinyScalarNetwork(NNBase):
         return self.values.unsqueeze(0).expand(batch_size, -1)
 
 
+class FakeALE:
+    def __init__(self, env):
+        self.env = env
+
+    def lives(self):
+        return self.env.lives
+
+
+class FakeBreakoutEnv(breakout_env.gym.Env):
+    def __init__(self):
+        self.observation_space = breakout_env.gym.spaces.Box(
+            0, 255, shape=(1,), dtype=np.uint8
+        )
+        self.action_space = breakout_env.gym.spaces.Discrete(4)
+        self.ale = FakeALE(self)
+        self.lives = 5
+        self.reset_calls = 0
+        self.actions = []
+        self.outcomes = []
+
+    def get_action_meanings(self):
+        return ["NOOP", "FIRE", "RIGHT", "LEFT"]
+
+    def queue_outcome(
+        self, lives, reward=0.0, terminated=False, truncated=False
+    ):
+        self.outcomes.append(
+            (lives, reward, terminated, truncated)
+        )
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        self.reset_calls += 1
+        self.lives = 5
+        return np.asarray([self.reset_calls], dtype=np.uint8), {}
+
+    def step(self, action):
+        self.actions.append(int(action))
+        reward, terminated, truncated = 0.0, False, False
+        if self.outcomes:
+            self.lives, reward, terminated, truncated = (
+                self.outcomes.pop(0)
+            )
+        observation = np.asarray([len(self.actions)], dtype=np.uint8)
+        return observation, reward, terminated, truncated, {}
+
+
 def make_agent(values=(0.0, 2.0), epoch=1, discount=1.0, n_step=1):
     return BreakoutSoftDQNAgent(
         "softdqn_breakout_test",
@@ -56,6 +107,114 @@ def make_agent(values=(0.0, 2.0), epoch=1, discount=1.0, n_step=1):
 
 
 class BreakoutSoftDQNTest(unittest.TestCase):
+    def test_training_life_loss_is_terminal_and_reset_keeps_game(self):
+        base_env = FakeBreakoutEnv()
+        env = breakout_env.FireReset(
+            base_env, terminal_on_life_loss=True
+        )
+        env.reset()
+
+        base_env.queue_outcome(lives=4, reward=1.0)
+        _, reward, terminated, truncated, info = env.step(2)
+
+        self.assertEqual(reward, 1.0)
+        self.assertTrue(terminated)
+        self.assertFalse(truncated)
+        self.assertTrue(info["life_lost"])
+        self.assertTrue(info["life_terminal"])
+        self.assertFalse(info["auto_fire"])
+        self.assertEqual(base_env.reset_calls, 1)
+        self.assertEqual(base_env.actions, [1, 2])
+
+        _, reset_info = env.reset()
+        self.assertTrue(reset_info["life_reset"])
+        self.assertEqual(base_env.reset_calls, 1)
+        self.assertEqual(base_env.lives, 4)
+        self.assertEqual(base_env.actions, [1, 2, 1])
+
+        base_env.queue_outcome(lives=0, terminated=True)
+        _, _, terminated, _, info = env.step(2)
+        self.assertTrue(terminated)
+        self.assertFalse(info["life_terminal"])
+
+        _, reset_info = env.reset()
+        self.assertFalse(reset_info["life_reset"])
+        self.assertEqual(base_env.reset_calls, 2)
+        self.assertEqual(base_env.lives, 5)
+
+    def test_evaluation_life_loss_auto_fires_without_terminal(self):
+        base_env = FakeBreakoutEnv()
+        env = breakout_env.FireReset(
+            base_env, terminal_on_life_loss=False
+        )
+        env.reset()
+
+        base_env.queue_outcome(lives=4, reward=1.0)
+        base_env.queue_outcome(lives=4, reward=2.0)
+        _, reward, terminated, truncated, info = env.step(2)
+
+        self.assertEqual(reward, 3.0)
+        self.assertFalse(terminated)
+        self.assertFalse(truncated)
+        self.assertTrue(info["life_lost"])
+        self.assertFalse(info["life_terminal"])
+        self.assertTrue(info["auto_fire"])
+        self.assertEqual(base_env.actions, [1, 2, 1])
+
+    def test_life_loss_with_truncation_uses_full_reset(self):
+        base_env = FakeBreakoutEnv()
+        env = breakout_env.FireReset(
+            base_env, terminal_on_life_loss=True
+        )
+        env.reset()
+
+        base_env.queue_outcome(lives=4, truncated=True)
+        _, _, terminated, truncated, info = env.step(2)
+
+        self.assertTrue(terminated)
+        self.assertTrue(truncated)
+        self.assertTrue(info["life_terminal"])
+        self.assertFalse(info["auto_fire"])
+
+        _, reset_info = env.reset()
+        self.assertFalse(reset_info["life_reset"])
+        self.assertEqual(base_env.reset_calls, 2)
+        self.assertEqual(base_env.lives, 5)
+
+    def test_life_loss_flushes_terminal_n_step_tail(self):
+        agent = make_agent(discount=0.5, n_step=5)
+        transition_cache = []
+        rewards = [1.0, 2.0, 4.0]
+
+        for index, reward in enumerate(rewards):
+            state = np.asarray([index], dtype=np.uint8)
+            next_state = np.asarray([index + 1], dtype=np.uint8)
+            transition_cache.append(
+                (
+                    state,
+                    0,
+                    reward,
+                    next_state,
+                    index == len(rewards) - 1,
+                    False,
+                )
+            )
+            store_n_step_transition(agent, transition_cache)
+
+        self.assertEqual(len(agent.buffer), 0)
+        self.assertEqual(
+            flush_n_step_transitions(agent, transition_cache), 3
+        )
+        self.assertEqual(transition_cache, [])
+        np.testing.assert_allclose(
+            agent.buffer.reward[:3, 0],
+            np.asarray([3.0, 4.0, 4.0]),
+        )
+        np.testing.assert_array_equal(
+            agent.buffer.n[:3, 0], np.asarray([3, 2, 1])
+        )
+        self.assertTrue(agent.buffer.terminated[:3, 0].all())
+
     def test_environment_disables_sticky_actions(self):
         with patch.object(
             breakout_env.gym,
@@ -65,6 +224,10 @@ class BreakoutSoftDQNTest(unittest.TestCase):
             env = breakout_env.make_breakout_env(update=True, num_envs=2)
 
         self.assertEqual(env, "vector_env")
+        self.assertEqual(
+            make_vec.call_args.kwargs["wrappers"],
+            [breakout_env.wrap_breakout_training_observation],
+        )
         self.assertEqual(
             make_vec.call_args.kwargs["repeat_action_probability"],
             0.0,

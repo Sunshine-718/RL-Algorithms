@@ -26,6 +26,7 @@ from breakout_env import (
 from common import (
     NNBase,
     SoftDQNAgentBase,
+    flush_n_step_transitions,
     reset_done_envs,
     reset_env,
     single_spaces,
@@ -236,7 +237,7 @@ if __name__ == "__main__":
         device=device,
     )
     config = Config()
-    agent_name = "softdqn_breakout_v2"
+    agent_name = "softdqn_breakout_v3"
     agent = BreakoutSoftDQNAgent(
         agent_name, q_network, config
     )
@@ -249,6 +250,7 @@ if __name__ == "__main__":
         f"observation={observation_space.shape}, actions={action_space.n}, "
         f"frame_skip={FRAME_SKIP}, stack_size={STACK_SIZE}, "
         f"repeat_action_probability={REPEAT_ACTION_PROBABILITY}, "
+        f"terminal_on_life_loss={bool(update)}, "
         f"learning_rate={learning_rate}, "
         f"capacity={config.capacity:,}, batch_size={batch_size}, "
         f"learning_starts={config.learning_starts:,}, epoch={config.epoch}, "
@@ -299,15 +301,15 @@ if __name__ == "__main__":
                 store_n_step_transition(
                     agent, episode_caches[env_id]
                 )
+                if done[env_id]:
+                    flush_n_step_transitions(
+                        agent, episode_caches[env_id]
+                    )
             episode_rewards[env_id] += float(rewards[env_id])
             if not done[env_id]:
                 continue
 
             if bool(update):
-                while episode_caches[env_id]:
-                    store_n_step_transition(
-                        agent, episode_caches[env_id], force=True
-                    )
                 agent.step(batch_size)
                 training_metrics = agent.last_training_metrics
 
