@@ -39,7 +39,7 @@ class Config:
     epoch: int = 30
     learning_starts: int = 20_000
     reward_scale: float = 1.0
-    n_step: int = 5
+    n_step: int = 1
     alpha: float = 0.1
 
 
@@ -49,13 +49,13 @@ class BreakoutQRDuelingNetwork(NNBase):
         super().__init__()
         self.features = nn.Sequential(
             nn.Conv2d(OBSERVATION_SHAPE[0], 32, kernel_size=8, stride=4),
-            nn.BatchNorm2d(32),
+            # nn.BatchNorm2d(32),
             nn.SiLU(inplace=True),
             nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            nn.BatchNorm2d(64),
+            # nn.BatchNorm2d(64),
             nn.SiLU(inplace=True),
             nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            nn.BatchNorm2d(64),
+            # nn.BatchNorm2d(64),
             nn.SiLU(inplace=True),
             nn.Flatten(),
         )
@@ -87,7 +87,7 @@ class BreakoutQRDuelingNetwork(NNBase):
     @staticmethod
     def init_weights(module):
         if isinstance(module, (nn.Conv2d, nn.Linear)):
-            nn.init.orthogonal_(module.weight, gain=np.sqrt(2.0))
+            nn.init.kaiming_normal_(module.weight)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.BatchNorm2d):
