@@ -5,6 +5,7 @@ import gymnasium as gym
 OBSERVATION_SHAPE = (4, 84, 84)
 FRAME_SKIP = 4
 STACK_SIZE = 4
+REPEAT_ACTION_PROBABILITY = 0.0
 
 
 gym.register_envs(ale_py)
@@ -97,11 +98,13 @@ def make_breakout_env(update, num_envs=4):
             },
             wrappers=[wrap_breakout_observation],
             frameskip=1,
+            repeat_action_probability=REPEAT_ACTION_PROBABILITY,
         )
 
     env = gym.make(
         "ALE/Breakout-v5",
         render_mode="human",
         frameskip=1,
+        repeat_action_probability=REPEAT_ACTION_PROBABILITY,
     )
     return wrap_breakout_observation(env)

@@ -2,17 +2,21 @@ import math
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
-DQN_ROOT = Path(__file__).resolve().parents[1] / "DQN"
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+DQN_ROOT = REPOSITORY_ROOT / "DQN"
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
 if str(DQN_ROOT) not in sys.path:
     sys.path.insert(0, str(DQN_ROOT))
 
+import breakout_env
 from common import NNBase, store_n_step_transition
 from softdqn_breakout import (
     BreakoutDuelingNetwork,
@@ -52,6 +56,42 @@ def make_agent(values=(0.0, 2.0), epoch=1, discount=1.0, n_step=1):
 
 
 class BreakoutSoftDQNTest(unittest.TestCase):
+    def test_environment_disables_sticky_actions(self):
+        with patch.object(
+            breakout_env.gym,
+            "make_vec",
+            return_value="vector_env",
+        ) as make_vec:
+            env = breakout_env.make_breakout_env(update=True, num_envs=2)
+
+        self.assertEqual(env, "vector_env")
+        self.assertEqual(
+            make_vec.call_args.kwargs["repeat_action_probability"],
+            0.0,
+        )
+        self.assertEqual(make_vec.call_args.kwargs["frameskip"], 1)
+
+        with (
+            patch.object(
+                breakout_env.gym,
+                "make",
+                return_value="raw_env",
+            ) as make,
+            patch.object(
+                breakout_env,
+                "wrap_breakout_observation",
+                return_value="wrapped_env",
+            ),
+        ):
+            env = breakout_env.make_breakout_env(update=False)
+
+        self.assertEqual(env, "wrapped_env")
+        self.assertEqual(
+            make.call_args.kwargs["repeat_action_probability"],
+            0.0,
+        )
+        self.assertEqual(make.call_args.kwargs["frameskip"], 1)
+
     def test_cnn_outputs_one_scalar_per_action(self):
         network = BreakoutDuelingNetwork(
             lr=1e-4,

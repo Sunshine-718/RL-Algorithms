@@ -19,6 +19,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 from breakout_env import (
     FRAME_SKIP,
     OBSERVATION_SHAPE,
+    REPEAT_ACTION_PROBABILITY,
     STACK_SIZE,
     make_breakout_env,
 )
@@ -247,6 +248,7 @@ if __name__ == "__main__":
         f"device={device}, envs={num_envs}, "
         f"observation={observation_space.shape}, actions={action_space.n}, "
         f"frame_skip={FRAME_SKIP}, stack_size={STACK_SIZE}, "
+        f"repeat_action_probability={REPEAT_ACTION_PROBABILITY}, "
         f"learning_rate={learning_rate}, "
         f"capacity={config.capacity:,}, batch_size={batch_size}, "
         f"learning_starts={config.learning_starts:,}, epoch={config.epoch}, "
