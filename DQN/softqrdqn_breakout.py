@@ -360,6 +360,7 @@ if __name__ == "__main__":
                     store_n_step_transition(
                         agent, episode_caches[env_id], force=True
                     )
+                agent.step()
 
             episode_index = completed_episodes
             episode_reward = float(episode_rewards[env_id])
@@ -393,8 +394,6 @@ if __name__ == "__main__":
             episode_rewards[env_id] = 0.0
             episode_lengths[env_id] = 0
 
-        if bool(update):
-            agent.step()
         if completed_episodes >= total_episodes:
             break
         states = reset_done_envs(env, next_states, done, update)
