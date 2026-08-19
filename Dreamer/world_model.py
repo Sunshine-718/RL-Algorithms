@@ -275,7 +275,9 @@ class WorldModel(nn.Module):
         reconstruction = self.decoder(feature)
         reward = self.reward(feature)
         continue_logits = self.continue_head(feature)
+        # 片段首帧没有片段内的前序 transition，只参与 observation 和 KL 学习。
         transition_mask = 1.0 - batch["is_first"]
+        # 奖励和 continue loss 按有效 transition 数取平均，并避免除零。
         denominator = transition_mask.sum().clamp_min(1.0)
 
         pixel_loss = F.mse_loss(
