@@ -26,10 +26,10 @@ class Config:
     discrete_entropy: float = 1e-3
     continuous_entropy: float = 1e-4
     slow_target_update: int = 100
-    deter_dim: int = 200
-    stoch_dim: int = 32
-    stoch_classes: int = 32
-    rssm_hidden_dim: int = 200
+    hidden_state_dim: int = 200
+    stochastic_dim: int = 32
+    stochastic_classes: int = 32
+    rssm_mlp_dim: int = 200
     hidden_dim: int = 400
     cnn_depth: int = 48
     adam_eps: float = 1e-5

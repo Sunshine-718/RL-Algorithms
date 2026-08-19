@@ -14,10 +14,13 @@ def stack_states(states):
 
 
 class DreamerGRUCell(nn.Module):
-    def __init__(self, input_dim, deter_dim):
+    def __init__(self, input_dim, hidden_state_dim):
         super().__init__()
-        self.linear = nn.Linear(input_dim + deter_dim, 3 * deter_dim)
-        self.norm = nn.LayerNorm(3 * deter_dim, eps=1e-3)
+        self.linear = nn.Linear(
+            input_dim + hidden_state_dim,
+            3 * hidden_state_dim,
+        )
+        self.norm = nn.LayerNorm(3 * hidden_state_dim, eps=1e-3)
 
     def forward(self, inputs, state):
         reset, candidate, update = self.norm(
@@ -82,69 +85,82 @@ class RSSM(nn.Module):
         self,
         action_dim,
         embed_dim,
-        deter_dim=200,
-        stoch_dim=32,
-        stoch_classes=32,
-        hidden_dim=400,
+        hidden_state_dim=200,
+        stochastic_dim=32,
+        stochastic_classes=32,
+        mlp_dim=400,
     ):
         super().__init__()
         self.action_dim = action_dim
-        self.deter_dim = deter_dim
-        self.stoch_dim = stoch_dim
-        self.stoch_classes = stoch_classes
-        self.stoch_size = stoch_dim * stoch_classes
+        self.hidden_state_dim = hidden_state_dim
+        self.stochastic_dim = stochastic_dim
+        self.stochastic_classes = stochastic_classes
+        self.stochastic_size = stochastic_dim * stochastic_classes
         self.img_in = nn.Sequential(
-            nn.Linear(self.stoch_size + action_dim, hidden_dim),
+            nn.Linear(self.stochastic_size + action_dim, mlp_dim),
             nn.SiLU(inplace=True),
         )
-        self.gru = DreamerGRUCell(hidden_dim, deter_dim)
+        self.gru = DreamerGRUCell(mlp_dim, hidden_state_dim)
         self.prior = nn.Sequential(
-            nn.Linear(deter_dim, hidden_dim),
+            nn.Linear(hidden_state_dim, mlp_dim),
             nn.SiLU(inplace=True),
-            nn.Linear(hidden_dim, self.stoch_size),
+            nn.Linear(mlp_dim, self.stochastic_size),
         )
         self.posterior = nn.Sequential(
-            nn.Linear(deter_dim + embed_dim, hidden_dim),
+            nn.Linear(hidden_state_dim + embed_dim, mlp_dim),
             nn.SiLU(inplace=True),
-            nn.Linear(hidden_dim, self.stoch_size),
+            nn.Linear(mlp_dim, self.stochastic_size),
         )
 
     @property
     def feature_dim(self):
-        return self.deter_dim + self.stoch_size
+        return self.hidden_state_dim + self.stochastic_size
 
     def initial(self, batch_size, device=None):
         device = device or next(self.parameters()).device
         return {
-            "deter": torch.zeros(batch_size, self.deter_dim, device=device),
-            "stoch": torch.zeros(
+            "hidden_state": torch.zeros(
                 batch_size,
-                self.stoch_dim,
-                self.stoch_classes,
+                self.hidden_state_dim,
+                device=device,
+            ),
+            "stochastic_state": torch.zeros(
+                batch_size,
+                self.stochastic_dim,
+                self.stochastic_classes,
                 device=device,
             ),
             "logits": torch.zeros(
                 batch_size,
-                self.stoch_dim,
-                self.stoch_classes,
+                self.stochastic_dim,
+                self.stochastic_classes,
                 device=device,
             ),
         }
 
     def get_feature(self, state):
-        stochastic = state["stoch"].flatten(start_dim=-2)
-        return torch.cat([state["deter"], stochastic], dim=-1)
+        stochastic_state = state["stochastic_state"].flatten(start_dim=-2)
+        return torch.cat(
+            [state["hidden_state"], stochastic_state],
+            dim=-1,
+        )
 
     def img_step(self, previous, previous_action, sample=True):
-        stochastic = previous["stoch"].flatten(start_dim=-2)
-        hidden = self.img_in(torch.cat([stochastic, previous_action], -1))
-        deter = self.gru(hidden, previous["deter"])
-        logits = self.prior(deter).reshape(
-            -1, self.stoch_dim, self.stoch_classes
+        stochastic_state = previous["stochastic_state"].flatten(
+            start_dim=-2
+        )
+        transition = self.img_in(
+            torch.cat([stochastic_state, previous_action], dim=-1)
+        )
+        hidden_state = self.gru(transition, previous["hidden_state"])
+        logits = self.prior(hidden_state).reshape(
+            -1,
+            self.stochastic_dim,
+            self.stochastic_classes,
         )
         return {
-            "deter": deter,
-            "stoch": self._sample(logits, sample),
+            "hidden_state": hidden_state,
+            "stochastic_state": self._sample(logits, sample),
             "logits": logits,
         }
 
@@ -169,11 +185,15 @@ class RSSM(nn.Module):
 
         prior = self.img_step(previous, previous_action, sample)
         logits = self.posterior(
-            torch.cat([prior["deter"], embed], dim=-1)
-        ).reshape(-1, self.stoch_dim, self.stoch_classes)
+            torch.cat([prior["hidden_state"], embed], dim=-1)
+        ).reshape(
+            -1,
+            self.stochastic_dim,
+            self.stochastic_classes,
+        )
         posterior = {
-            "deter": prior["deter"],
-            "stoch": self._sample(logits, sample),
+            "hidden_state": prior["hidden_state"],
+            "stochastic_state": self._sample(logits, sample),
             "logits": logits,
         }
         return posterior, prior
@@ -200,7 +220,9 @@ class RSSM(nn.Module):
             index = Categorical(logits=logits).sample()
         else:
             index = logits.argmax(dim=-1)
-        hard = F.one_hot(index, self.stoch_classes).to(probabilities.dtype)
+        hard = F.one_hot(index, self.stochastic_classes).to(
+            probabilities.dtype
+        )
         # 前向使用 one-hot，反向使用类别概率的梯度。
         return hard + probabilities - probabilities.detach()
 
@@ -213,10 +235,10 @@ class WorldModel(nn.Module):
         self.rssm = RSSM(
             action_dim,
             self.encoder.output_dim,
-            config.deter_dim,
-            config.stoch_dim,
-            config.stoch_classes,
-            config.rssm_hidden_dim,
+            config.hidden_state_dim,
+            config.stochastic_dim,
+            config.stochastic_classes,
+            config.rssm_mlp_dim,
         )
         feature_dim = self.rssm.feature_dim
         self.decoder = ImageDecoder(feature_dim, config.cnn_depth)

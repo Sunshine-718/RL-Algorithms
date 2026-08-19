@@ -929,7 +929,7 @@
             <ul id="annotation-list">
               <li><code>sample=True</code>：训练时随机采样。</li>
               <li><code>sample=False</code>：评估时选择最大概率类别。</li>
-              <li>每个随机变量有 <code>stoch_classes</code> 个类别。</li>
+              <li>每个随机变量有 <code>stochastic_classes</code> 个类别。</li>
             </ul>
             <span class="source" id="annotation-source">RSSM._sample()</span>
           </aside>
@@ -963,7 +963,7 @@
                 <tr><td>sequence_length</td><td>32</td><td>真实训练序列长度</td></tr>
                 <tr><td>imagination_horizon</td><td>15</td><td>想象轨迹长度</td></tr>
                 <tr><td>discount / lambda</td><td>0.99 / 0.95</td><td>λ-return 权重</td></tr>
-                <tr><td>stoch_dim × classes</td><td>32 × 32</td><td>离散随机状态</td></tr>
+                <tr><td>stochastic_dim × stochastic_classes</td><td>32 × 32</td><td>离散随机状态</td></tr>
                 <tr><td>train_every</td><td>5</td><td>环境步与更新频率</td></tr>
                 <tr><td>slow_target_update</td><td>100</td><td>目标 Critic 同步间隔</td></tr>
               </tbody>
@@ -1075,7 +1075,9 @@ class Config:
         index = Categorical(logits=logits).sample()
     else:
         index = logits.argmax(dim=-1)
-    hard = F.one_hot(index, self.stoch_classes).to(probabilities.dtype)
+    hard = F.one_hot(index, self.stochastic_classes).to(
+        probabilities.dtype
+    )
     # 前向使用 one-hot，反向使用类别概率的梯度。
     return hard + probabilities - probabilities.detach()</template>
 
@@ -1167,7 +1169,7 @@ class Config:
         file: "Dreamer/world_model.py · RSSM._sample",
         title: "直通离散采样",
         text: "前向使用 one-hot，反向把梯度交给类别概率。该状态随后与 GRU 确定状态拼接成模型特征。",
-        list: ["sample=True：训练时随机采样。", "sample=False：评估时选择最大概率类别。", "每个随机变量有 stoch_classes 个类别。"],
+        list: ["sample=True：训练时随机采样。", "sample=False：评估时选择最大概率类别。", "每个随机变量有 stochastic_classes 个类别。"],
         source: "RSSM._sample()"
       },
       world: {

@@ -177,7 +177,7 @@ class DreamerV2Agent:
         return {key: float(value.item()) for key, value in metrics.items()}
 
     def _train_behavior(self, start):
-        if not len(start["deter"]):
+        if not len(start["hidden_state"]):
             zero = torch.tensor(0.0, device=self.device)
             return {
                 "actor_loss": zero,
