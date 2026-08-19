@@ -130,6 +130,11 @@ def train(env, agent, config):
             episode_reward = 0.0
             episode_length = 0
 
+    # 固定训练步数可能在 episode 中途耗尽，保留最后片段和最新参数。
+    if episode_length:
+        agent.process()
+        agent.save("last")
+
 
 def evaluate(env, agent, episodes):
     rewards = []

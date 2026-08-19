@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from unittest.mock import Mock
 
 import numpy as np
 import torch
@@ -7,7 +8,7 @@ import torch
 from Dreamer.agent import DreamerV2Agent
 from Dreamer.behavior import Actor
 from Dreamer.config import Config
-from Dreamer.dreamerv2 import make_carracing_env
+from Dreamer.dreamerv2 import make_carracing_env, train
 from Dreamer.replaybuffer import SequenceReplayBuffer, as_chw_uint8
 
 
@@ -164,6 +165,28 @@ class DreamerV2AgentTest(unittest.TestCase):
                 agent.actor.parameters(), clone.actor.parameters()
             ):
                 torch.testing.assert_close(left, right)
+
+
+class DreamerTrainingLoopTest(unittest.TestCase):
+    def test_final_partial_episode_and_parameters_are_saved(self):
+        env = Mock()
+        env.reset.return_value = (0, {})
+        env.step.return_value = (0, 1.0, False, False, {})
+        agent = Mock()
+        agent.buffer = []
+        agent.action.return_value = 0
+        agent.step.return_value = None
+        config = Config(
+            prefill=0,
+            total_steps=3,
+            train_every=4,
+            train_steps=1,
+        )
+        train(env, agent, config)
+
+        self.assertEqual(agent.cache.call_count, 3)
+        agent.process.assert_called_once_with()
+        agent.save.assert_called_once_with("last")
 
 
 class CarRacingIntegrationTest(unittest.TestCase):
