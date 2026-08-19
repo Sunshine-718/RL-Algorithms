@@ -1082,28 +1082,21 @@ class Config:
     return hard + probabilities - probabilities.detach()</template>
 
   <template id="code-world">def _kl_loss(self, posterior_logits, prior_logits):
-    posterior = torch.softmax(posterior_logits, dim=-1)
-    prior = torch.softmax(prior_logits, dim=-1)
-
-    def categorical_kl(left, right):
-        return (
-            left
-            * (
-                torch.log(left.clamp_min(1e-8))
-                - torch.log(right.clamp_min(1e-8))
-            )
-        ).sum(dim=(-1, -2))
+    posterior = Categorical(logits=posterior_logits)
+    prior = Categorical(logits=prior_logits)
+    fixed_posterior = Categorical(logits=posterior_logits.detach())
+    fixed_prior = Categorical(logits=prior_logits.detach())
 
     # KL balance 让先验承担更多拟合责任，后验仍保留较弱的正则梯度。
-    posterior_kl = categorical_kl(posterior, prior.detach()).mean()
-    prior_kl = categorical_kl(posterior.detach(), prior).mean()
+    posterior_kl = kl_divergence(posterior, fixed_prior).sum(-1).mean()
+    prior_kl = kl_divergence(fixed_posterior, prior).sum(-1).mean()
     free = posterior_kl.new_tensor(self.config.free_nats)
     loss = (
         (1.0 - self.config.kl_balance)
         * torch.maximum(posterior_kl, free)
         + self.config.kl_balance * torch.maximum(prior_kl, free)
     )
-    value = categorical_kl(posterior.detach(), prior.detach()).mean()
+    value = kl_divergence(fixed_posterior, fixed_prior).sum(-1).mean()
     return loss, value</template>
 
   <template id="code-agent">def _imagine(self, start):

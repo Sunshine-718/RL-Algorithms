@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Categorical
+from torch.distributions import Categorical, kl_divergence
 
 from carracing_env import OBSERVATION_SHAPE
 
@@ -278,16 +278,21 @@ class WorldModel(nn.Module):
         transition_mask = 1.0 - batch["is_first"]
         denominator = transition_mask.sum().clamp_min(1.0)
 
+        pixel_loss = F.mse_loss(
+            reconstruction,
+            observation,
+            reduction="none",
+        )
         reconstruction_loss = (
-            0.5
-            * (reconstruction - observation)
-            .square()
-            .sum(dim=(-3, -2, -1))
+            0.5 * pixel_loss.sum(dim=(-3, -2, -1))
         ).mean()
+        reward_error = F.mse_loss(
+            reward,
+            batch["reward"],
+            reduction="none",
+        )
         reward_loss = (
-            0.5
-            * (reward - batch["reward"]).pow(2)
-            * transition_mask
+            0.5 * reward_error * transition_mask
         ).sum() / denominator
         continue_loss = (
             F.binary_cross_entropy_with_logits(
@@ -321,26 +326,19 @@ class WorldModel(nn.Module):
         return total, outputs, metrics
 
     def _kl_loss(self, posterior_logits, prior_logits):
-        posterior = torch.softmax(posterior_logits, dim=-1)
-        prior = torch.softmax(prior_logits, dim=-1)
-
-        def categorical_kl(left, right):
-            return (
-                left
-                * (
-                    torch.log(left.clamp_min(1e-8))
-                    - torch.log(right.clamp_min(1e-8))
-                )
-            ).sum(dim=(-1, -2))
+        posterior = Categorical(logits=posterior_logits)
+        prior = Categorical(logits=prior_logits)
+        fixed_posterior = Categorical(logits=posterior_logits.detach())
+        fixed_prior = Categorical(logits=prior_logits.detach())
 
         # KL balance 让先验承担更多拟合责任，后验仍保留较弱的正则梯度。
-        posterior_kl = categorical_kl(posterior, prior.detach()).mean()
-        prior_kl = categorical_kl(posterior.detach(), prior).mean()
+        posterior_kl = kl_divergence(posterior, fixed_prior).sum(-1).mean()
+        prior_kl = kl_divergence(fixed_posterior, prior).sum(-1).mean()
         free = posterior_kl.new_tensor(self.config.free_nats)
         loss = (
             (1.0 - self.config.kl_balance)
             * torch.maximum(posterior_kl, free)
             + self.config.kl_balance * torch.maximum(prior_kl, free)
         )
-        value = categorical_kl(posterior.detach(), prior.detach()).mean()
+        value = kl_divergence(fixed_posterior, fixed_prior).sum(-1).mean()
         return loss, value

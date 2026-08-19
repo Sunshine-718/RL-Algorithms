@@ -5,6 +5,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import Adam
 
 from Dreamer.behavior import Actor, Critic, lambda_return
@@ -216,9 +217,14 @@ class DreamerV2Agent:
 
         self.critic_opt.zero_grad()
         critic_value = self.critic(imagination["feature"][:-1].detach())
+        critic_error = F.mse_loss(
+            critic_value,
+            imagination["return"].detach(),
+            reduction="none",
+        )
         critic_loss = (
             imagination["weight"].detach()
-            * (critic_value - imagination["return"].detach()).pow(2)
+            * critic_error
         ).mean()
         critic_loss.backward()
         critic_grad = nn.utils.clip_grad_norm_(
