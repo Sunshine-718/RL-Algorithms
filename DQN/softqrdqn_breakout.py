@@ -34,8 +34,8 @@ class Config:
     discount: float = 0.99
     params: str = "./params"
     tau: float = 3e-2
-    # State and next-state frame stacks use about 52.57 GiB as uint8.
-    capacity: int = 1_000_000
+    # State and next-state frame stacks use about 26.29 GiB as uint8.
+    capacity: int = 500_000
     epoch: int = 30
     learning_starts: int = 20_000
     reward_scale: float = 1.0
