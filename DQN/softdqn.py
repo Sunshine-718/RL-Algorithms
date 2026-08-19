@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from torch.optim import NAdam, SGD
 from torch.distributions import Categorical
 from dataclasses import dataclass, asdict
 from replaybuffer import ReplayBuffer
@@ -12,7 +11,7 @@ import gymnasium as gym
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
 from common import (
-    ResidualBlock, NNBase, DQNAgentBase, make_train_test_env,
+    ResidualBlock, NNBase, SoftDQNAgentBase, make_train_test_env,
     single_spaces, reset_env, step_env, reset_done_envs, flush_episode,
 )
 
@@ -27,6 +26,8 @@ class Config:
     reward_scale: float = 1.
     n_step: int = 5
     alpha: float = 0.1
+    alpha_min: float = 0.05
+    alpha_max: float = 1.0
 
 
 class DuelingDQN(NNBase):
@@ -61,11 +62,12 @@ class DuelingDQN(NNBase):
         return q
 
 
-class SoftDQNAgent(DQNAgentBase):
+class SoftDQNAgent(SoftDQNAgentBase):
     def __init__(self, name, Q, config):
         self.net = Q
         self.target_net = deepcopy(Q)
         self.target_net.computes_grad(False)
+        self.target_net.eval()
         self.buffer = ReplayBuffer(Q.obs_dim, config.capacity, 1, config.discount, config.n_step, Q.device)
 
         self.name = name
@@ -76,20 +78,11 @@ class SoftDQNAgent(DQNAgentBase):
         self.reward_scale = config.reward_scale
         self._n_step = config.n_step
         self.tau = config.tau
-        self._alpha = torch.FloatTensor([np.log(config.alpha)]).requires_grad_(True)
-        self.alpha_opt = SGD([self._alpha], 0.1)
+        self.configure_alpha(
+            config.alpha, config.alpha_min, config.alpha_max
+        )
         self.target_entropy = float(np.log(Q.action_dim)) * 0.98
         self.soft_update(tau=1)
-    
-    @property
-    def alpha(self):
-        return max(min(float(self._alpha.exp().item()), 1), 0.05)
-
-    @alpha.setter
-    def alpha(self, val):
-        self._alpha = torch.FloatTensor([np.log(val)]).requires_grad_(True)
-        self.alpha_opt = SGD([self._alpha], 0.1)
-        return self.alpha
 
     @torch.no_grad()
     def action(self, state, deterministic=False):
@@ -108,11 +101,25 @@ class SoftDQNAgent(DQNAgentBase):
 
     @torch.no_grad()
     def td_target(self, reward, next_state, terminated, n):
-        next_q1 = self.net(next_state)
-        next_q2 = self.target_net(next_state)
-        next_q = torch.minimum(next_q1, next_q2)
-        logsumexp = self.alpha * torch.logsumexp(next_q / self.alpha, dim=1).reshape(-1, 1)
-        return reward + torch.pow(self.discount, n) * logsumexp * (1 - terminated)
+        training = self.net.training
+        self.net.eval()
+        online_q = self.net(next_state)
+        self.net.train(training)
+        target_q = self.target_net(next_state)
+        log_probabilities = torch.log_softmax(
+            online_q / self.alpha, dim=1
+        )
+        probabilities = log_probabilities.exp()
+        soft_value = (
+            probabilities
+            * (target_q - self.alpha * log_probabilities)
+        ).sum(dim=1, keepdim=True)
+        return (
+            reward
+            + torch.pow(self.discount, n)
+            * soft_value
+            * (1 - terminated)
+        )
 
     def loss(self, state, action, reward, next_state, terminated, truncated, n):
         # Q(St, At) <- Q(St, At) + alpha * [R_{t+1} + gamma * max_a(Q_St+1, a)} - Q(S_t, A_t)]
@@ -131,13 +138,7 @@ class SoftDQNAgent(DQNAgentBase):
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.net.opt.step()
-                self.alpha_opt.zero_grad()
-                probs = torch.softmax(q / self.alpha, dim=-1).cpu()
-                dist = Categorical(probs)
-                alpha_loss = torch.exp(self._alpha).clamp_max(1.) * (dist.entropy().mean() - self.target_entropy)
-                alpha_loss.backward()
-                nn.utils.clip_grad_norm_([self._alpha], 0.1)
-                self.alpha_opt.step()
+                self._update_alpha(q)
                 self.soft_update()
             info = {'loss': loss.item()}
             return info
@@ -157,7 +158,7 @@ if __name__ == "__main__":
                        if bool(update) else env.theta_threshold_radians)
     Q = DuelingDQN(1e-3, obs_dim, 128, action_dim, 0., True, device)
     config = Config()
-    agent = SoftDQNAgent('cartpole_softdqn', Q, config)
+    agent = SoftDQNAgent('cartpole_softdqn_v2', Q, config)
     agent.load(required=not bool(update))
     agent.n_step = 5
     reward_container = []

@@ -9,7 +9,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
-from torch.optim import SGD
 from tqdm.auto import tqdm
 
 
@@ -27,8 +26,8 @@ from carracing_env import (
     wrap_carracing_observation,
 )
 from common import (
-    DQNAgentBase,
     NNBase,
+    SoftDQNAgentBase,
     flush_episode,
     reset_done_envs,
     reset_env,
@@ -49,6 +48,8 @@ class Config:
     reward_scale: float = 1.0
     n_step: int = 5
     alpha: float = 0.1
+    alpha_min: float = 0.05
+    alpha_max: float = 1.0
 
 
 class CarRacingQNetwork(NNBase):
@@ -105,11 +106,12 @@ class CarRacingQNetwork(NNBase):
         return self.head(self.features(state))
 
 
-class CarRacingSoftDQNAgent(DQNAgentBase):
+class CarRacingSoftDQNAgent(SoftDQNAgentBase):
     def __init__(self, name, q_network, config):
         self.net = q_network
         self.target_net = deepcopy(q_network)
         self.target_net.computes_grad(False)
+        self.target_net.eval()
         self.buffer = ImageReplayBuffer(
             q_network.obs_shape,
             config.capacity,
@@ -127,24 +129,11 @@ class CarRacingSoftDQNAgent(DQNAgentBase):
         self.reward_scale = config.reward_scale
         self._n_step = config.n_step
         self.tau = config.tau
-        self._alpha = torch.tensor(
-            [np.log(config.alpha)], dtype=torch.float32, requires_grad=True
+        self.configure_alpha(
+            config.alpha, config.alpha_min, config.alpha_max
         )
-        self.alpha_opt = SGD([self._alpha], lr=0.1)
         self.target_entropy = float(np.log(q_network.action_dim)) * 0.98
         self.soft_update(tau=1.0)
-
-    @property
-    def alpha(self):
-        return max(min(float(self._alpha.exp().item()), 1.0), 0.05)
-
-    @alpha.setter
-    def alpha(self, value):
-        self._alpha = torch.tensor(
-            [np.log(value)], dtype=torch.float32, requires_grad=True
-        )
-        self.alpha_opt = SGD([self._alpha], lr=0.1)
-        return self.alpha
 
     @torch.no_grad()
     def action(self, state, deterministic=False):
@@ -166,15 +155,24 @@ class CarRacingSoftDQNAgent(DQNAgentBase):
 
     @torch.no_grad()
     def td_target(self, reward, next_state, terminated, n):
+        training = self.net.training
+        self.net.eval()
         online_q = self.net(next_state)
+        self.net.train(training)
         target_q = self.target_net(next_state)
-        next_q = torch.minimum(online_q, target_q)
-        soft_value = self.alpha * torch.logsumexp(
-            next_q / self.alpha, dim=1, keepdim=True
+        log_probabilities = torch.log_softmax(
+            online_q / self.alpha, dim=1
         )
+        probabilities = log_probabilities.exp()
+        soft_value = (
+            probabilities
+            * (target_q - self.alpha * log_probabilities)
+        ).sum(dim=1, keepdim=True)
         return (
             reward
-            + torch.pow(self.discount, n) * soft_value * (1.0 - terminated)
+            + torch.pow(self.discount, n)
+            * soft_value
+            * (1.0 - terminated)
         )
 
     def loss(self, state, action, reward, next_state, terminated, truncated,
@@ -197,17 +195,7 @@ class CarRacingSoftDQNAgent(DQNAgentBase):
             nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
             self.net.opt.step()
 
-            self.alpha_opt.zero_grad()
-            probabilities = torch.softmax(
-                q_value / self.alpha, dim=-1
-            ).cpu()
-            entropy = Categorical(probabilities).entropy().mean()
-            alpha_loss = torch.exp(self._alpha).clamp_max(1.0) * (
-                entropy - self.target_entropy
-            )
-            alpha_loss.backward()
-            nn.utils.clip_grad_norm_([self._alpha], 0.1)
-            self.alpha_opt.step()
+            self._update_alpha(q_value)
             self.soft_update()
 
         return {"loss": loss.item(), "alpha": self.alpha}
@@ -232,7 +220,7 @@ if __name__ == "__main__":
     )
     config = Config()
     agent = CarRacingSoftDQNAgent(
-        "softdqn_carracing", q_network, config
+        "softdqn_carracing_v2", q_network, config
     )
     agent.load(required=not bool(update))
 

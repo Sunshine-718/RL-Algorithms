@@ -8,7 +8,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.distributions import Categorical
-from torch.optim import SGD
 from tqdm.auto import tqdm
 
 
@@ -18,40 +17,15 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from breakout_env import OBSERVATION_SHAPE, make_breakout_env
 from common import (
-    DQNAgentBase,
     NNBase,
+    SoftDQNAgentBase,
     reset_done_envs,
     reset_env,
     single_spaces,
     step_env,
+    weighted_quantile_huber_loss,
 )
 from image_replaybuffer import ImageReplayBuffer
-
-
-def weighted_quantile_huber_loss(pred, target, target_weight, tau, kappa=1.0):
-    """Quantile Huber loss for a weighted empirical target distribution."""
-    if pred.ndim != 2 or target.ndim != 2:
-        raise ValueError("pred and target must have shape [batch, quantiles]")
-    if target.shape != target_weight.shape:
-        raise ValueError("target and target_weight must have the same shape")
-    if pred.shape[0] != target.shape[0]:
-        raise ValueError("pred and target batch sizes must match")
-    if tau.shape[-1] != pred.shape[-1]:
-        raise ValueError("tau must contain one value per predicted quantile")
-
-    td_error = target.unsqueeze(1) - pred.unsqueeze(2)
-    abs_error = td_error.abs()
-    huber = torch.where(
-        abs_error <= kappa,
-        0.5 * td_error.pow(2),
-        kappa * (abs_error - 0.5 * kappa),
-    )
-    quantile_weight = torch.abs(
-        tau.unsqueeze(-1) - (td_error.detach() < 0).float()
-    )
-    return (
-        quantile_weight * huber * target_weight.unsqueeze(1)
-    ).sum(dim=-1).mean()
 
 
 @dataclass
@@ -145,7 +119,7 @@ class BreakoutQRDuelingNetwork(NNBase):
         return value + advantage - advantage.mean(dim=1, keepdim=True)
 
 
-class BreakoutSoftQRDQNAgent(DQNAgentBase):
+class BreakoutSoftQRDQNAgent(SoftDQNAgentBase):
     def __init__(self, name, q_network, config):
         self.net = q_network
         self.target_net = deepcopy(q_network)
@@ -169,22 +143,12 @@ class BreakoutSoftQRDQNAgent(DQNAgentBase):
         self.reward_scale = config.reward_scale
         self._n_step = config.n_step
         self.tau = config.tau
-        self.alpha_min = float(config.alpha_min)
-        self.alpha_max = float(config.alpha_max)
-        if not (
-            np.isfinite(self.alpha_min)
-            and np.isfinite(self.alpha_max)
-            and 0.0 < self.alpha_min <= self.alpha_max
-        ):
-            raise ValueError("alpha bounds must satisfy 0 < min <= max")
-        initial_alpha = float(config.alpha)
-        if not np.isfinite(initial_alpha) or initial_alpha <= 0.0:
-            raise ValueError("alpha must be finite and positive")
-        self._alpha = torch.tensor(
-            [np.log(initial_alpha)], dtype=torch.float32, requires_grad=True
+        self.configure_alpha(
+            config.alpha,
+            alpha_min=config.alpha_min,
+            alpha_max=config.alpha_max,
+            lr=0.1,
         )
-        self._project_alpha_()
-        self.alpha_opt = SGD([self._alpha], lr=0.1)
         self.target_entropy = float(np.log(q_network.action_dim)) * 0.45
         self.qr_tau = torch.linspace(
             0.5 / q_network.num_quantiles,
@@ -193,35 +157,6 @@ class BreakoutSoftQRDQNAgent(DQNAgentBase):
             device=q_network.device,
         ).view(1, -1)
         self.soft_update(tau=1.0)
-
-    @property
-    def alpha(self):
-        value = float(self._alpha.detach().exp().item())
-        return max(min(value, self.alpha_max), self.alpha_min)
-
-    @alpha.setter
-    def alpha(self, value):
-        value = float(value)
-        if not np.isfinite(value) or value <= 0.0:
-            raise ValueError("alpha must be finite and positive")
-        value = float(np.clip(value, self.alpha_min, self.alpha_max))
-        with torch.no_grad():
-            self._alpha.fill_(np.log(value))
-        return self.alpha
-
-    @torch.no_grad()
-    def _project_alpha_(self):
-        self._alpha.clamp_(
-            min=np.log(self.alpha_min),
-            max=np.log(self.alpha_max),
-        )
-
-    def load(self, model="last", required=False):
-        loaded = super().load(model, required)
-        if not bool(torch.isfinite(self._alpha).all().item()):
-            raise ValueError("checkpoint log_alpha must be finite")
-        self._project_alpha_()
-        return loaded
 
     @torch.no_grad()
     def action(self, state, deterministic=False):
@@ -288,24 +223,6 @@ class BreakoutSoftQRDQNAgent(DQNAgentBase):
             self.qr_tau,
         )
         return loss, quantiles.detach()
-
-    def _update_alpha(self, quantiles):
-        self._project_alpha_()
-        q_value = quantiles.detach().mean(dim=-1).cpu()
-        probabilities = torch.softmax(
-            q_value / self.alpha, dim=-1
-        )
-        entropy = Categorical(probabilities).entropy().mean()
-
-        self.alpha_opt.zero_grad()
-        alpha_loss = self._alpha.exp() * (
-            entropy - self.target_entropy
-        ).detach()
-        alpha_loss.backward()
-        nn.utils.clip_grad_norm_([self._alpha], 0.1)
-        self.alpha_opt.step()
-        self._project_alpha_()
-        return entropy
 
     def step(self, batch_size=128):
         if len(self.buffer) < max(batch_size, self.learning_starts):

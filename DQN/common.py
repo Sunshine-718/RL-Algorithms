@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import NAdam, SGD
+from torch.distributions import Categorical
 import gymnasium as gym
 import numpy as np
 from pathlib import Path
@@ -94,6 +95,32 @@ def quantile_huber_loss(pred, target, tau, kappa=1.0):
         tau.unsqueeze(-1) - (td_error.detach() < 0).float()
     )
     return (weight * huber).mean()
+
+
+def weighted_quantile_huber_loss(pred, target, target_weight, tau, kappa=1.0):
+    """Quantile Huber loss for a weighted empirical target distribution."""
+    if pred.ndim != 2 or target.ndim != 2:
+        raise ValueError("pred and target must have shape [batch, quantiles]")
+    if target.shape != target_weight.shape:
+        raise ValueError("target and target_weight must have the same shape")
+    if pred.shape[0] != target.shape[0]:
+        raise ValueError("pred and target batch sizes must match")
+    if tau.shape[-1] != pred.shape[-1]:
+        raise ValueError("tau must contain one value per predicted quantile")
+
+    td_error = target.unsqueeze(1) - pred.unsqueeze(2)
+    abs_error = td_error.abs()
+    huber = torch.where(
+        abs_error <= kappa,
+        0.5 * td_error.pow(2),
+        kappa * (abs_error - 0.5 * kappa),
+    )
+    quantile_weight = torch.abs(
+        tau.unsqueeze(-1) - (td_error.detach() < 0).float()
+    )
+    return (
+        quantile_weight * huber * target_weight.unsqueeze(1)
+    ).sum(dim=-1).mean()
 
 
 class QuantileEmbedding(nn.Module):
@@ -235,3 +262,82 @@ class DQNAgentBase:
         tau = self.tau if tau is None else tau
         for target_param, param in zip(self.target_net.parameters(), self.net.parameters()):
             target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
+
+
+class SoftDQNAgentBase(DQNAgentBase):
+    def configure_alpha(self, initial_alpha, alpha_min=0.05, alpha_max=1.0,
+                        lr=0.1):
+        self.alpha_min = float(alpha_min)
+        self.alpha_max = float(alpha_max)
+        if not (
+            np.isfinite(self.alpha_min)
+            and np.isfinite(self.alpha_max)
+            and 0.0 < self.alpha_min <= self.alpha_max
+        ):
+            raise ValueError("alpha bounds must satisfy 0 < min <= max")
+
+        initial_alpha = float(initial_alpha)
+        if not np.isfinite(initial_alpha) or initial_alpha <= 0.0:
+            raise ValueError("alpha must be finite and positive")
+        lr = float(lr)
+        if not np.isfinite(lr) or lr <= 0.0:
+            raise ValueError("alpha learning rate must be finite and positive")
+
+        self._alpha = torch.tensor(
+            [np.log(initial_alpha)], dtype=torch.float32, requires_grad=True
+        )
+        self._project_alpha_()
+        self.alpha_opt = SGD([self._alpha], lr=lr)
+        return self
+
+    @property
+    def alpha(self):
+        value = float(self._alpha.detach().exp().item())
+        return max(min(value, self.alpha_max), self.alpha_min)
+
+    @alpha.setter
+    def alpha(self, value):
+        value = float(value)
+        if not np.isfinite(value) or value <= 0.0:
+            raise ValueError("alpha must be finite and positive")
+        value = float(np.clip(value, self.alpha_min, self.alpha_max))
+        with torch.no_grad():
+            self._alpha.fill_(np.log(value))
+
+    @torch.no_grad()
+    def _project_alpha_(self):
+        if not torch.isfinite(self._alpha).all():
+            raise ValueError("log_alpha must be finite")
+        self._alpha.clamp_(
+            min=np.log(self.alpha_min),
+            max=np.log(self.alpha_max),
+        )
+
+    def load(self, model='last', required=False):
+        loaded = super().load(model, required)
+        self._project_alpha_()
+        return loaded
+
+    def _update_alpha(self, q_values):
+        if q_values.ndim == 3:
+            q_values = q_values.mean(dim=-1)
+        elif q_values.ndim != 2:
+            raise ValueError(
+                "q_values must have shape [batch, actions] or "
+                "[batch, actions, quantiles]"
+            )
+
+        self._project_alpha_()
+        q_values = q_values.detach().cpu()
+        probabilities = torch.softmax(q_values / self.alpha, dim=-1)
+        entropy = Categorical(probabilities).entropy().mean()
+
+        self.alpha_opt.zero_grad()
+        alpha_loss = self._alpha.exp() * (
+            entropy - self.target_entropy
+        ).detach()
+        alpha_loss.backward()
+        nn.utils.clip_grad_norm_([self._alpha], 0.1)
+        self.alpha_opt.step()
+        self._project_alpha_()
+        return entropy

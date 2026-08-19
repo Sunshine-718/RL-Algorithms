@@ -1,10 +1,8 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
-from torch.optim import NAdam, SGD
 from torch.distributions import Categorical
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from replaybuffer import ReplayBuffer
 from copy import deepcopy
 
@@ -12,7 +10,8 @@ import gymnasium as gym
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
 from common import (
-    ResidualBlock, NNBase, DQNAgentBase, quantile_huber_loss,
+    ResidualBlock, NNBase, SoftDQNAgentBase,
+    weighted_quantile_huber_loss,
     make_train_test_env, single_spaces, reset_env, step_env,
     reset_done_envs, flush_episode,
 )
@@ -29,6 +28,8 @@ class Config:
     reward_scale: float = 1.
     n_step: int = 5
     alpha: float = 0.1
+    alpha_min: float = 0.05
+    alpha_max: float = 1.0
 
 
 class QRDuelingDQN(NNBase):
@@ -65,11 +66,12 @@ class QRDuelingDQN(NNBase):
         return q
 
 
-class SoftQRDQNAgent(DQNAgentBase):
+class SoftQRDQNAgent(SoftDQNAgentBase):
     def __init__(self, name, Q, config):
         self.net = Q
         self.target_net = deepcopy(Q)
         self.target_net.computes_grad(False)
+        self.target_net.eval()
         self.buffer = ReplayBuffer(Q.obs_dim, config.capacity, 1, config.discount, config.n_step, Q.device)
 
         self.name = name
@@ -80,22 +82,13 @@ class SoftQRDQNAgent(DQNAgentBase):
         self.reward_scale = config.reward_scale
         self._n_step = config.n_step
         self.tau = config.tau
-        self._alpha = torch.FloatTensor([np.log(config.alpha)]).requires_grad_(True)
-        self.alpha_opt = SGD([self._alpha], 0.1)
+        self.configure_alpha(
+            config.alpha, config.alpha_min, config.alpha_max
+        )
         self.target_entropy = float(np.log(Q.action_dim)) * 0.45
         self.qr_tau = torch.linspace(0.5 / Q.num_quantiles, 1 - 0.5 / Q.num_quantiles,
                                      Q.num_quantiles).to(Q.device).view(1, -1)
         self.soft_update(tau=1)
-    
-    @property
-    def alpha(self):
-        return max(min(float(self._alpha.exp().item()), 1), 0.05)
-
-    @alpha.setter
-    def alpha(self, val):
-        self._alpha = torch.FloatTensor([np.log(val)]).requires_grad_(True)
-        self.alpha_opt = SGD([self._alpha], 0.1)
-        return self.alpha
 
     @torch.no_grad()
     def action(self, state, deterministic=False):
@@ -114,11 +107,31 @@ class SoftQRDQNAgent(DQNAgentBase):
 
     @torch.no_grad()
     def td_target(self, reward, next_state, terminated, n):
-        next_q1 = self.net(next_state)
-        next_q2 = self.target_net(next_state)
-        next_q = torch.minimum(next_q1, next_q2)
-        logsumexp = self.alpha * torch.logsumexp(next_q / self.alpha, dim=1).reshape(-1, self.net.num_quantiles)
-        return reward + torch.pow(self.discount, n) * logsumexp * (1 - terminated)
+        training = self.net.training
+        self.net.eval()
+        online_quantiles = self.net(next_state)
+        self.net.train(training)
+        target_quantiles = self.target_net(next_state)
+
+        log_probabilities = torch.log_softmax(
+            online_quantiles.mean(dim=-1) / self.alpha,
+            dim=1,
+        )
+        probabilities = log_probabilities.exp()
+        soft_target_atoms = (
+            target_quantiles
+            - self.alpha * log_probabilities.unsqueeze(-1)
+        )
+        target_atoms = (
+            reward.unsqueeze(-1)
+            + torch.pow(self.discount, n).unsqueeze(-1)
+            * soft_target_atoms
+            * (1.0 - terminated).unsqueeze(-1)
+        )
+        atom_weights = probabilities.unsqueeze(-1).expand_as(
+            target_quantiles
+        ) / self.net.num_quantiles
+        return target_atoms.flatten(1), atom_weights.flatten(1)
 
     def loss(self, state, action, reward, next_state, terminated, truncated, n):
         # Q(St, At) <- Q(St, At) + alpha * [R_{t+1} + gamma * max_a(Q_St+1, a)} - Q(S_t, A_t)]
@@ -126,8 +139,13 @@ class SoftQRDQNAgent(DQNAgentBase):
         value = self.net(state)
         action = action.view(batch_size, 1, 1).expand(batch_size, 1, self.net.num_quantiles).long()
         q = value.gather(1, action).squeeze(1)
-        td_target = self.td_target(reward, next_state, terminated, n)
-        return quantile_huber_loss(q, td_target, self.qr_tau), value.detach()
+        target_atoms, target_weights = self.td_target(
+            reward, next_state, terminated, n
+        )
+        loss = weighted_quantile_huber_loss(
+            q, target_atoms, target_weights, self.qr_tau
+        )
+        return loss, value.detach()
 
     def step(self, batch_size=128):
         if len(self.buffer) >= batch_size:
@@ -139,13 +157,7 @@ class SoftQRDQNAgent(DQNAgentBase):
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.net.opt.step()
-                self.alpha_opt.zero_grad()
-                probs = torch.softmax(q.mean(dim=-1) / self.alpha, dim=-1).cpu()
-                dist = Categorical(probs)
-                alpha_loss = torch.exp(self._alpha).clamp_max(1.) * (dist.entropy().mean() - self.target_entropy)
-                alpha_loss.backward()
-                nn.utils.clip_grad_norm_([self._alpha], 0.1)
-                self.alpha_opt.step()
+                self._update_alpha(q)
                 self.soft_update()
             info = {'loss': loss.item()}
             return info
@@ -162,7 +174,7 @@ if __name__ == "__main__":
     obs_dim = observation_space.shape[0]
     Q = QRDuelingDQN(1e-3, obs_dim, 128, action_dim, 51, 0., True, device)
     config = Config()
-    agent = SoftQRDQNAgent('flappybird_softqrdqn', Q, config)
+    agent = SoftQRDQNAgent('flappybird_softqrdqn_v2', Q, config)
     agent.load(required=not bool(update))
     agent.n_step = 5
     reward_container = []
