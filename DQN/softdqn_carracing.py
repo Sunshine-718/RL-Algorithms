@@ -242,7 +242,7 @@ if __name__ == "__main__":
     recent_rewards = np.zeros(interval)
     best_average = -float("inf")
     average_reward = 0.0
-    total_episodes = 10_000
+    total_episodes = float("inf") if bool(update) else 10_000
     iterator = tqdm(total=total_episodes)
     plt.ion()
 

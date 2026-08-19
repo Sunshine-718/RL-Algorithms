@@ -1,5 +1,6 @@
 from copy import deepcopy
 from dataclasses import dataclass
+from itertools import count
 
 import gymnasium as gym
 import matplotlib.pyplot as plt
@@ -388,15 +389,14 @@ if __name__ == '__main__':
         device=device,
     )
     agent = DRQNAgent('cartpole_drqn', Q, config)
-    if not bool(update):
-        agent.load('best')
+    agent.load()
 
-    total_episodes = 2000 if bool(update) else 10
     reward_container = []
     loss_container = []
     best_eval_reward = -float('inf')
     last_eval_reward = float('nan')
-    iterator = tqdm(range(total_episodes))
+    episodes = count() if bool(update) else range(10)
+    iterator = tqdm(episodes)
 
     try:
         for episode in iterator:
@@ -464,11 +464,10 @@ if __name__ == '__main__':
                 f'noise: {agent.noise: .3f}'
             )
             if solved:
-                print(
+                iterator.write(
                     f'Solved at episode {episode + 1}: '
                     f'evaluation reward {last_eval_reward:.2f}'
                 )
-                break
     finally:
         if bool(update):
             agent.save()

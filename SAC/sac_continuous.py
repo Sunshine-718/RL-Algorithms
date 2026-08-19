@@ -186,7 +186,7 @@ if __name__ == "__main__":
                        device=device)
     config = Config()
     agent = ContinuousSACAgent('test', ac, config)
-    # agent.load()
+    agent.load()
     agent.n_step = 5
     reward_container = []
     Loss = []
@@ -196,7 +196,7 @@ if __name__ == "__main__":
     avg = np.zeros(interval)
     best_avg = -float('inf')
     res = 0
-    total_episodes = 10000
+    total_episodes = float('inf') if bool(update) else 10_000
     iterator = tqdm(total=total_episodes)
     plt.ion()
     states = reset_env(env, update)

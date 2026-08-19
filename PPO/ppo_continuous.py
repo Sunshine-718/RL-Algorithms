@@ -6,6 +6,7 @@ import numpy as np
 from torch.optim import NAdam, AdamW
 from copy import deepcopy
 from torch.distributions import Beta
+from itertools import count
 
 import gymnasium as gym
 from gymnasium.wrappers import RescaleAction, NormalizeObservation, NormalizeReward, RecordEpisodeStatistics
@@ -202,7 +203,7 @@ if __name__ == "__main__":
     ac = ContinuousPPO(1e-4, env.observation_space.shape[0], 128, env.action_space.shape[0], 1, True, device=device)
     config = Config()
     agent = PPOAgent('test', ac, config)
-    # agent.load()
+    agent.load()
     reward_container = []
     Loss = []
     td_error = []
@@ -211,7 +212,8 @@ if __name__ == "__main__":
     avg = np.zeros(interval)
     best_avg = -float('inf')
     res = 0
-    iterator = tqdm(range(10000))
+    episodes = count() if bool(update) else range(10_000)
+    iterator = tqdm(episodes)
     plt.ion()
 
     # scaler = RewardScaler()

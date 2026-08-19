@@ -5,6 +5,7 @@ from torch.utils.data import TensorDataset, DataLoader
 import numpy as np
 from torch.optim import NAdam
 from torch.distributions import Categorical
+from itertools import count
 from common import ResidualBlock, ReplayBuffer, PPOAgentBase, NNBase
 
 import gymnasium as gym
@@ -173,7 +174,7 @@ if __name__ == "__main__":
     ac = DiscretePPO(3e-4, env.observation_space.shape[0], 128, env.action_space.n, True, device)
     config = Config()
     agent = PPOAgent('test', ac, config)
-    # agent.load()
+    agent.load()
     reward_container = []
     Loss = []
     td_error = []
@@ -182,7 +183,8 @@ if __name__ == "__main__":
     avg = np.zeros(interval)
     best_avg = -float('inf')
     res = 0
-    iterator = tqdm(range(10000))
+    episodes = count() if bool(update) else range(10_000)
+    iterator = tqdm(episodes)
     plt.ion()
     for i in iterator:
         state = env.reset()[0]

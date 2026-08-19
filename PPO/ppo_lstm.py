@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 from torch.optim import NAdam
 from dataclasses import dataclass
+from itertools import count
 from common import ResidualBlock
 from torch.distributions import Categorical
 import gymnasium as gym
@@ -406,8 +407,7 @@ if __name__ == "__main__":
     best_avg = -float('inf')
 
     # 训练循环
-    max_episodes = 2000
-    pbar = tqdm(range(max_episodes))
+    pbar = tqdm(count())
 
     for i in pbar:
         state, _ = env.reset()

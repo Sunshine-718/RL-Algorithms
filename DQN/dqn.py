@@ -157,7 +157,7 @@ if __name__ == "__main__":
     avg = np.zeros(interval)
     best_avg = -float('inf')
     res = 0
-    total_episodes = 1000000
+    total_episodes = float('inf') if bool(update) else 1_000_000
     iterator = tqdm(total=total_episodes)
     plt.ion()
     states = reset_env(env, update)
