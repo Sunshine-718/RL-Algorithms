@@ -110,18 +110,21 @@ class BreakoutSoftDQNTest(unittest.TestCase):
     def test_training_life_loss_is_terminal_and_reset_keeps_game(self):
         base_env = FakeBreakoutEnv()
         env = breakout_env.FireReset(
-            base_env, terminal_on_life_loss=True
+            base_env,
+            terminal_on_life_loss=True,
+            life_loss_penalty=-5.0,
         )
         env.reset()
 
         base_env.queue_outcome(lives=4, reward=1.0)
         _, reward, terminated, truncated, info = env.step(2)
 
-        self.assertEqual(reward, 1.0)
+        self.assertEqual(reward, -4.0)
         self.assertTrue(terminated)
         self.assertFalse(truncated)
         self.assertTrue(info["life_lost"])
         self.assertTrue(info["life_terminal"])
+        self.assertEqual(info["life_loss_penalty"], -5.0)
         self.assertFalse(info["auto_fire"])
         self.assertEqual(base_env.reset_calls, 1)
         self.assertEqual(base_env.actions, [1, 2])
@@ -133,14 +136,34 @@ class BreakoutSoftDQNTest(unittest.TestCase):
         self.assertEqual(base_env.actions, [1, 2, 1])
 
         base_env.queue_outcome(lives=0, terminated=True)
-        _, _, terminated, _, info = env.step(2)
+        _, reward, terminated, _, info = env.step(2)
+        self.assertEqual(reward, -5.0)
         self.assertTrue(terminated)
         self.assertFalse(info["life_terminal"])
+        self.assertEqual(info["life_loss_penalty"], -5.0)
 
         _, reset_info = env.reset()
         self.assertFalse(reset_info["life_reset"])
         self.assertEqual(base_env.reset_calls, 2)
         self.assertEqual(base_env.lives, 5)
+
+    def test_truncation_without_life_loss_has_no_penalty(self):
+        base_env = FakeBreakoutEnv()
+        env = breakout_env.FireReset(
+            base_env,
+            terminal_on_life_loss=True,
+            life_loss_penalty=-5.0,
+        )
+        env.reset()
+
+        base_env.queue_outcome(lives=5, reward=2.0, truncated=True)
+        _, reward, terminated, truncated, info = env.step(2)
+
+        self.assertEqual(reward, 2.0)
+        self.assertFalse(terminated)
+        self.assertTrue(truncated)
+        self.assertFalse(info["life_lost"])
+        self.assertEqual(info["life_loss_penalty"], 0.0)
 
     def test_evaluation_life_loss_auto_fires_without_terminal(self):
         base_env = FakeBreakoutEnv()
@@ -158,19 +181,23 @@ class BreakoutSoftDQNTest(unittest.TestCase):
         self.assertFalse(truncated)
         self.assertTrue(info["life_lost"])
         self.assertFalse(info["life_terminal"])
+        self.assertEqual(info["life_loss_penalty"], 0.0)
         self.assertTrue(info["auto_fire"])
         self.assertEqual(base_env.actions, [1, 2, 1])
 
     def test_life_loss_with_truncation_uses_full_reset(self):
         base_env = FakeBreakoutEnv()
         env = breakout_env.FireReset(
-            base_env, terminal_on_life_loss=True
+            base_env,
+            terminal_on_life_loss=True,
+            life_loss_penalty=-5.0,
         )
         env.reset()
 
         base_env.queue_outcome(lives=4, truncated=True)
-        _, _, terminated, truncated, info = env.step(2)
+        _, reward, terminated, truncated, info = env.step(2)
 
+        self.assertEqual(reward, -5.0)
         self.assertTrue(terminated)
         self.assertTrue(truncated)
         self.assertTrue(info["life_terminal"])
@@ -184,7 +211,7 @@ class BreakoutSoftDQNTest(unittest.TestCase):
     def test_life_loss_flushes_terminal_n_step_tail(self):
         agent = make_agent(discount=0.5, n_step=5)
         transition_cache = []
-        rewards = [1.0, 2.0, 4.0]
+        rewards = [1.0, 2.0, -5.0]
 
         for index, reward in enumerate(rewards):
             state = np.asarray([index], dtype=np.uint8)
@@ -208,7 +235,7 @@ class BreakoutSoftDQNTest(unittest.TestCase):
         self.assertEqual(transition_cache, [])
         np.testing.assert_allclose(
             agent.buffer.reward[:3, 0],
-            np.asarray([3.0, 4.0, 4.0]),
+            np.asarray([0.75, -0.5, -5.0]),
         )
         np.testing.assert_array_equal(
             agent.buffer.n[:3, 0], np.asarray([3, 2, 1])

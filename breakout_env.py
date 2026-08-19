@@ -1,3 +1,5 @@
+import math
+
 import ale_py
 import gymnasium as gym
 
@@ -6,19 +8,30 @@ OBSERVATION_SHAPE = (4, 84, 84)
 FRAME_SKIP = 4
 STACK_SIZE = 4
 REPEAT_ACTION_PROBABILITY = 0.0
+LIFE_LOSS_PENALTY = -5.0
 
 
 gym.register_envs(ale_py)
 
 
 class FireReset(gym.Wrapper):
-    def __init__(self, env, terminal_on_life_loss=False):
+    def __init__(
+        self,
+        env,
+        terminal_on_life_loss=False,
+        life_loss_penalty=0.0,
+    ):
         super().__init__(env)
         action_meanings = self.unwrapped.get_action_meanings()
         if "FIRE" not in action_meanings:
             raise ValueError("environment does not provide a FIRE action")
         self.fire_action = action_meanings.index("FIRE")
         self.terminal_on_life_loss = bool(terminal_on_life_loss)
+        self.life_loss_penalty = float(life_loss_penalty)
+        if not math.isfinite(self.life_loss_penalty):
+            raise ValueError("life_loss_penalty must be finite")
+        if self.life_loss_penalty > 0.0:
+            raise ValueError("life_loss_penalty must not be positive")
         self.life_terminated = False
         self.lives = 0
 
@@ -91,11 +104,15 @@ class FireReset(gym.Wrapper):
         else:
             self.life_terminated = False
 
+        applied_penalty = self.life_loss_penalty if life_lost else 0.0
+        reward = float(reward) + applied_penalty
+
         info = dict(info)
         info.update(
             {
                 "life_lost": life_lost,
                 "life_terminal": life_terminal,
+                "life_loss_penalty": applied_penalty,
                 "auto_fire": auto_fire,
             }
         )
@@ -103,7 +120,9 @@ class FireReset(gym.Wrapper):
         return observation, reward, terminated, truncated, info
 
 
-def wrap_breakout_observation(env, terminal_on_life_loss=False):
+def wrap_breakout_observation(
+    env, terminal_on_life_loss=False, life_loss_penalty=0.0
+):
     env = gym.wrappers.AtariPreprocessing(
         env,
         frame_skip=FRAME_SKIP,
@@ -114,13 +133,19 @@ def wrap_breakout_observation(env, terminal_on_life_loss=False):
         scale_obs=False,
     )
     env = FireReset(
-        env, terminal_on_life_loss=terminal_on_life_loss
+        env,
+        terminal_on_life_loss=terminal_on_life_loss,
+        life_loss_penalty=life_loss_penalty,
     )
     return gym.wrappers.FrameStackObservation(env, stack_size=STACK_SIZE)
 
 
 def wrap_breakout_training_observation(env):
-    return wrap_breakout_observation(env, terminal_on_life_loss=True)
+    return wrap_breakout_observation(
+        env,
+        terminal_on_life_loss=True,
+        life_loss_penalty=LIFE_LOSS_PENALTY,
+    )
 
 
 def make_breakout_env(update, num_envs=4):
