@@ -172,8 +172,8 @@ if __name__ == "__main__":
                        if bool(update) else env.theta_threshold_radians)
     Q = DuelingIQN(1e-3, obs_dim, 128, action_dim, 0., True, device)
     config = Config()
-    agent = SoftIQNAgent('test', Q, config)
-    agent.load()
+    agent = SoftIQNAgent('cartpole_softiqn', Q, config)
+    agent.load(required=not bool(update))
     agent.n_step = 5
     reward_container = []
     Loss = []
@@ -198,7 +198,7 @@ if __name__ == "__main__":
         rewards = (2 * ((x_threshold - np.abs(x)) / x_threshold - 0.8)
                    + (theta_threshold - np.abs(theta)) / theta_threshold - 0.5)
         episode_lengths += 1
-        truncated = np.logical_or(truncated, episode_lengths > max_steps)
+        truncated = np.logical_or(truncated, episode_lengths >= max_steps)
         done = np.logical_or(terminated, truncated)
         for env_id in range(num_envs):
             if completed_episodes >= total_episodes:
@@ -221,7 +221,8 @@ if __name__ == "__main__":
             j = int(episode_lengths[env_id])
             reward_container.append(episode_reward_sum)
             avg[i % interval] = episode_reward_sum
-            agent.save()
+            if bool(update):
+                agent.save()
             if i % interval == 0 and i != 0:
                 plt.clf()
                 plt.plot(reward_container, label='Reward')

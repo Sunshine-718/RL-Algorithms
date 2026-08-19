@@ -149,18 +149,20 @@ class TD3Agent(AgentBase):
                 critic_loss = quantile_huber_loss(q1, td_target, self.qr_tau) + \
                     quantile_huber_loss(q2, td_target, self.qr_tau)
                 critic_loss.backward()
-                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
+                nn.utils.clip_grad_norm_(
+                    list(self.net.q1.parameters()) + list(self.net.q2.parameters()),
+                    0.5
+                )
                 self.net.critic_opt.step()
                 self.update_step += 1
                 if self.update_step % self.update_actor_interval == 0:
                     self.net.actor_opt.zero_grad()
-                    q1, q2 = self.net.critic(state, self.net.actor(state))
-                    q = torch.minimum(q1, q2)
-                    actor_loss = -torch.mean(q)
+                    q1, _ = self.net.critic(state, self.net.actor(state))
+                    actor_loss = -torch.mean(q1)
                     actor_loss.backward()
-                    nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
+                    nn.utils.clip_grad_norm_(self.net.pi.parameters(), 0.5)
                     self.net.actor_opt.step()
-                self.soft_update()
+                    self.soft_update()
             self.decay_noise()
 
 
@@ -175,8 +177,8 @@ if __name__ == "__main__":
     ac = TD3(1e-3, observation_space.shape[0], 128,
              action_space.shape[0], 1, 0, 51, True, device)
     config = Config()
-    agent = TD3Agent('test', ac, config)
-    agent.load()
+    agent = TD3Agent('pendulum_qrtd3', ac, config)
+    agent.load(required=not bool(update))
     agent.n_step = 5
     reward_container = []
     Loss = []
@@ -200,7 +202,7 @@ if __name__ == "__main__":
             env, actions, update
         )
         episode_lengths += 1
-        truncated = np.logical_or(truncated, episode_lengths > max_steps)
+        truncated = np.logical_or(truncated, episode_lengths >= max_steps)
         done = np.logical_or(terminated, truncated)
         for env_id in range(num_envs):
             if completed_episodes >= total_episodes:
@@ -226,7 +228,8 @@ if __name__ == "__main__":
             j = int(episode_lengths[env_id])
             reward_container.append(episode_reward_sum)
             avg[i % interval] = episode_reward_sum
-            agent.save()
+            if bool(update):
+                agent.save()
             if i % interval == 0 and i != 0:
                 plt.clf()
                 plt.plot(reward_container, label='Reward')

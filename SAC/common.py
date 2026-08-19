@@ -155,32 +155,35 @@ class NetworkBase(nn.Module):
 
     def load(self, path=None):
         try:
-            if path is not None:
-                state_dict = torch.load(path, map_location=self.device)
-                model_state = dict(state_dict["model"])
-                temperature_version = int(
-                    state_dict.get("temperature_version", 1)
-                )
-                reset_temperature = (
-                    temperature_version < SAC_TEMPERATURE_VERSION
-                )
-                if reset_temperature:
-                    model_state["alpha"] = self.alpha.detach().clone()
-                elif "alpha" not in model_state and "alpha" in state_dict:
-                    model_state = dict(model_state)
-                    model_state["alpha"] = state_dict["alpha"].detach()
-                self.load_state_dict(model_state)
-                self.actor_opt.load_state_dict(state_dict["actor_opt"])
-                self.critic_opt.load_state_dict(state_dict["critic_opt"])
-                if reset_temperature:
-                    print("Reset legacy SAC temperature state.")
-                else:
-                    self.alpha_opt.load_state_dict(state_dict["alpha_opt"])
-        except Exception as e:
-            print('Failed to load parameters.')
-            print(e)
+            if path is None:
+                return False
+            state_dict = torch.load(
+                path, map_location=self.device, weights_only=True
+            )
+            model_state = dict(state_dict["model"])
+            temperature_version = int(
+                state_dict.get("temperature_version", 1)
+            )
+            reset_temperature = (
+                temperature_version < SAC_TEMPERATURE_VERSION
+            )
+            if reset_temperature:
+                model_state["alpha"] = self.alpha.detach().clone()
+            elif "alpha" not in model_state and "alpha" in state_dict:
+                model_state["alpha"] = state_dict["alpha"].detach()
+            self.load_state_dict(model_state)
+            self.actor_opt.load_state_dict(state_dict["actor_opt"])
+            self.critic_opt.load_state_dict(state_dict["critic_opt"])
+            if reset_temperature:
+                print("Reset legacy SAC temperature state.")
+            else:
+                self.alpha_opt.load_state_dict(state_dict["alpha_opt"])
+        except FileNotFoundError:
+            print(f'Checkpoint not found: {path}')
+            return False
         finally:
             self.to(self.device)
+        return True
 
 
 class AgentBase:
@@ -206,12 +209,17 @@ class AgentBase:
         else:
             self.net.save(f'{self.name}_{model}.pt')
 
-    def load(self, model='last'):
+    def load(self, model='last', required=False):
+        path = f'{self.name}_{model}.pt'
         if self.params is not None:
-            self.net.load(f'{self.params}/{self.name}_{model}.pt')
-        else:
-            self.net.load(f'{self.name}_{model}.pt')
+            path = f'{self.params}/{path}'
+        loaded = self.net.load(path)
+        if not loaded:
+            if required:
+                raise FileNotFoundError(path)
+            return False
         self.soft_update(tau=1)
+        return True
 
     def soft_update(self, tau=None):
         tau = self.tau if tau is None else tau

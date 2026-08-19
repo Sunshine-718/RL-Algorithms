@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from pathlib import Path
 
 
 def quantile_huber_loss(pred, target, tau, kappa=1.0):
@@ -53,35 +54,111 @@ class NNBase(nn.Module):
         for param in self.parameters():
             param.requires_grad_(requires_grad)
 
-    def save(self, path=None):
+    def save(self, path=None, extra_state=None):
         if path is not None:
-            torch.save(self.state_dict(), path)
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            checkpoint = self.state_dict()
+            if extra_state:
+                checkpoint = {
+                    'model_state_dict': checkpoint,
+                    **extra_state,
+                }
+            torch.save(checkpoint, path)
 
     def load(self, path=None):
         try:
-            if path is not None:
-                self.load_state_dict(torch.load(path, map_location=self.device))
-        except Exception as _:
-            print('Failed to load parameters.')
+            if path is None:
+                return False
+            checkpoint = torch.load(
+                path, map_location=self.device, weights_only=True
+            )
+            state_dict = checkpoint.get('model_state_dict', checkpoint)
+            self.load_state_dict(state_dict)
+        except FileNotFoundError:
+            print(f'Checkpoint not found: {path}')
+            return False
         finally:
             self.to(self.device)
+        return checkpoint
 
 
 class PPOAgentBase:
     def store(self, state, action, reward, next_state, terminated, truncated):
-        self.buffer.store(state, action, reward, next_state, terminated, truncated)
+        reward = reward * getattr(self, 'reward_scale', 1.0)
+        self.buffer.store(
+            state, action, reward, next_state, terminated, truncated
+        )
 
     def save(self, model='last'):
+        path = f'{self.name}_{model}.pt'
         if self.params is not None:
-            self.net.save(f'{self.params}/{self.name}_{model}.pt')
-        else:
-            self.net.save(f'{self.name}_{model}.pt')
+            path = f'{self.params}/{path}'
+        normalizer_state = {}
+        for name, wrapper in getattr(self, 'normalizers', {}).items():
+            rms = getattr(wrapper, 'obs_rms', None)
+            if rms is None:
+                rms = getattr(wrapper, 'return_rms', None)
+            if rms is None:
+                continue
+            state = {
+                'mean': torch.as_tensor(np.asarray(rms.mean)).clone(),
+                'var': torch.as_tensor(np.asarray(rms.var)).clone(),
+                'count': float(rms.count),
+            }
+            if hasattr(wrapper, 'discounted_reward'):
+                state['discounted_reward'] = torch.as_tensor(
+                    np.asarray(wrapper.discounted_reward)
+                ).clone()
+            normalizer_state[name] = state
+        extra_state = (
+            {'normalizers': normalizer_state} if normalizer_state else None
+        )
+        self.net.save(path, extra_state)
 
-    def load(self, model='last'):
+    def load(self, model='last', required=False):
+        path = f'{self.name}_{model}.pt'
         if self.params is not None:
-            self.net.load(f'{self.params}/{self.name}_{model}.pt')
-        else:
-            self.net.load(f'{self.name}_{model}.pt')
+            path = f'{self.params}/{path}'
+        checkpoint = self.net.load(path)
+        if checkpoint is False:
+            if required:
+                raise FileNotFoundError(path)
+            return False
+        normalizers = getattr(self, 'normalizers', {})
+        saved_normalizers = checkpoint.get('normalizers', {})
+        missing_normalizers = set(normalizers) - set(saved_normalizers)
+        if missing_normalizers:
+            missing = ', '.join(sorted(missing_normalizers))
+            raise RuntimeError(
+                f'Checkpoint is missing normalizer state: {missing}'
+            )
+        for name, state in saved_normalizers.items():
+            wrapper = normalizers.get(name)
+            if wrapper is None:
+                continue
+            rms = getattr(wrapper, 'obs_rms', None)
+            if rms is None:
+                rms = getattr(wrapper, 'return_rms', None)
+            if rms is None:
+                continue
+            mean = state['mean']
+            var = state['var']
+            if torch.is_tensor(mean):
+                mean = mean.cpu().numpy()
+            if torch.is_tensor(var):
+                var = var.cpu().numpy()
+            rms.mean = np.asarray(mean, dtype=rms.mean.dtype).copy()
+            rms.var = np.asarray(var, dtype=rms.var.dtype).copy()
+            rms.count = float(state['count'])
+            if 'discounted_reward' in state and hasattr(
+                    wrapper, 'discounted_reward'):
+                discounted_reward = state['discounted_reward']
+                if torch.is_tensor(discounted_reward):
+                    discounted_reward = discounted_reward.cpu().numpy()
+                wrapper.discounted_reward = np.asarray(
+                    discounted_reward
+                ).copy()
+        return True
 
     @staticmethod
     def GAE(discount, gaeLambda, rewards, values, next_values, terminated, truncated):

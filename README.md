@@ -83,7 +83,7 @@ Dreamer V2 按职责分为 `config.py`、`world_model.py`、`behavior.py`、
 ## 依赖要求
 
 主要依赖：
-- Python 3.7+
+- Python 3.10+
 - PyTorch
 - Gym / Gymnasium
 - NumPy

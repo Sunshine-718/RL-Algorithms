@@ -31,6 +31,48 @@ class Config:
     decay: float = 0.99
 
 
+class SPRReplayBuffer(ReplayBuffer):
+    """Keep both one-step and n-step successors for SPR and TD learning."""
+
+    def __init__(self, state_dim, capacity, action_dim, discount, n_step=1,
+                 device='cpu'):
+        super().__init__(state_dim, capacity, action_dim, discount, n_step, device)
+        self.one_step_next_state = torch.empty_like(self.state)
+
+    def process(self):
+        assert self.cache
+        while self.cache:
+            state, action, _, one_step_next_state, _, _ = self.cache[0]
+            horizon = min(self.n_step, len(self.cache))
+            reward = sum(
+                self.cache[i][2] * pow(self.discount, i)
+                for i in range(horizon)
+            )
+            _, _, _, next_state, terminated, truncated = self.cache[horizon - 1]
+            self.store(
+                state, action, reward, next_state, terminated, truncated,
+                horizon, one_step_next_state,
+            )
+            self.cache.pop(0)
+
+    def store(self, state, action, reward, next_state, terminated, truncated,
+              n, one_step_next_state):
+        super().store(state, action, reward, next_state, terminated, truncated, n)
+        idx = (self.counter - 1) % self.capacity
+        if isinstance(one_step_next_state, np.ndarray):
+            one_step_next_state = torch.from_numpy(one_step_next_state).to(self.device)
+        self.one_step_next_state[idx] = one_step_next_state
+
+    def sample(self, batch_size):
+        idx = torch.from_numpy(np.random.randint(0, len(self), batch_size)).long()
+        return (
+            self.state[idx], self.action[idx, :], self.reward[idx, :],
+            self.next_state[idx], self.terminated[idx, :].int(),
+            self.truncated[idx, :].int(), self.n[idx, :],
+            self.one_step_next_state[idx],
+        )
+
+
 class DuelingDQN(NNBase):
     def __init__(self, lr, obs_dim, h_dim, num_actions, dropout=0., computes_grad=True, device='cpu'):
         super().__init__()
@@ -74,7 +116,10 @@ class DoubleDQNAgent(DQNAgentBase):
         self.net = Q
         self.target_net = deepcopy(Q)
         self.target_net.computes_grad(False)
-        self.buffer = ReplayBuffer(Q.obs_dim, config.capacity, 1, config.discount, config.n_step, Q.device)
+        self.buffer = SPRReplayBuffer(
+            Q.obs_dim, config.capacity, 1, config.discount,
+            config.n_step, Q.device,
+        )
 
         self.name = name
         self.n_actions = Q.action_dim
@@ -115,11 +160,12 @@ class DoubleDQNAgent(DQNAgentBase):
         next_q = self.target_net(next_state)[0].gather(1, next_action)
         return reward + torch.pow(self.discount, n) * next_q * (1 - terminated)
 
-    def loss(self, state, action, reward, next_state, terminated, truncated, n):
+    def loss(self, state, action, reward, next_state, terminated, truncated, n,
+             one_step_next_state):
         # Q(St, At) <- Q(St, At) + alpha * [R_{t+1} + gamma * max_a(Q_St+1, a)} - Q(S_t, A_t)]
         value, next_latent = self.net(state, action)
         with torch.no_grad():
-            _, next_current_latent = self.net(next_state)
+            _, next_current_latent = self.net(one_step_next_state)
         q = value.gather(1, action.long())
         td_target = self.td_target(reward, next_state, terminated, n)
         return F.smooth_l1_loss(q, td_target) - 5 * F.cosine_similarity(next_latent, next_current_latent).mean()
@@ -152,8 +198,8 @@ if __name__ == "__main__":
     obs_dim = observation_space.shape[0]
     Q = DuelingDQN(1e-3, obs_dim, 128, action_dim, 0., True, device)
     config = Config()
-    agent = DoubleDQNAgent('test', Q, config)
-    agent.load()
+    agent = DoubleDQNAgent('flappybird_spr_dqn', Q, config)
+    agent.load(required=not bool(update))
     reward_container = []
     Loss = []
     td_error = []
@@ -174,7 +220,7 @@ if __name__ == "__main__":
         actions = agent.action(states, not update)
         next_states, rewards, terminated, truncated, _ = step_env(env, actions, update)
         episode_lengths += 1
-        truncated = np.logical_or(truncated, episode_lengths > max_steps)
+        truncated = np.logical_or(truncated, episode_lengths >= max_steps)
         done = np.logical_or(terminated, truncated)
         for env_id in range(num_envs):
             if completed_episodes >= total_episodes:
@@ -197,7 +243,8 @@ if __name__ == "__main__":
             j = int(episode_lengths[env_id])
             reward_container.append(episode_reward_sum)
             avg[i % interval] = episode_reward_sum
-            agent.save()
+            if bool(update):
+                agent.save()
             if i % interval == 0 and i != 0:
                 plt.clf()
                 plt.plot(reward_container, label='Reward')

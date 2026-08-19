@@ -79,6 +79,11 @@ class DiscreteSAC(NetworkBase):
 
 class DiscreteSACAgent(AgentBase):
     def __init__(self, name, ac, config):
+        critic_update_factor = config.critic_update_factor
+        if isinstance(critic_update_factor, bool) or \
+                not isinstance(critic_update_factor, int) or \
+                critic_update_factor <= 0:
+            raise ValueError("critic_update_factor must be a positive integer")
         self.net = ac
         self.target_net = deepcopy(ac)
         self.target_net.computes_grad(False)
@@ -92,7 +97,7 @@ class DiscreteSACAgent(AgentBase):
         self.reward_scale = config.reward_scale
         self._n_step = config.n_step
         self.tau = config.tau
-        self.critic_update_factor = config.critic_update_factor
+        self.critic_update_factor = critic_update_factor
         self.target_entropy = math.log(self.n_actions) * 0.45
         self.soft_update(tau=1)
 
@@ -127,19 +132,20 @@ class DiscreteSACAgent(AgentBase):
     def step(self, batch_size=128):
         if batch_size <= len(self.buffer):
             for _ in range(self.epoch):
-                state, action, reward0, next_state, terminated, truncated, n = self.buffer.sample(batch_size)
-                reward = reward0 * self.reward_scale
-                self.target_net.eval()
-                self.net.train()
+                for _ in range(self.critic_update_factor):
+                    state, action, reward0, next_state, terminated, truncated, n = self.buffer.sample(batch_size)
+                    reward = reward0 * self.reward_scale
+                    self.target_net.eval()
+                    self.net.train()
 
-                td_target = self.td_target(reward, next_state, terminated, n)
-                q1, q2 = self.net.critic(state)
-                self.net.critic_opt.zero_grad()
-                critic_loss = F.smooth_l1_loss(q1.gather(1, action.long()), td_target) + \
-                    F.smooth_l1_loss(q2.gather(1, action.long()), td_target)
-                critic_loss.backward()
-                nn.utils.clip_grad_norm_(list(self.net.q1.parameters()) + list(self.net.q2.parameters()), 0.5)
-                self.net.critic_opt.step()
+                    td_target = self.td_target(reward, next_state, terminated, n)
+                    q1, q2 = self.net.critic(state)
+                    self.net.critic_opt.zero_grad()
+                    critic_loss = F.smooth_l1_loss(q1.gather(1, action.long()), td_target) + \
+                        F.smooth_l1_loss(q2.gather(1, action.long()), td_target)
+                    critic_loss.backward()
+                    nn.utils.clip_grad_norm_(list(self.net.q1.parameters()) + list(self.net.q2.parameters()), 0.5)
+                    self.net.critic_opt.step()
 
                 self.net.q1.eval()
                 self.net.q2.eval()
@@ -180,8 +186,8 @@ if __name__ == "__main__":
     ac = DiscreteSAC(1e-3, 3e-3, observation_space.shape[0], 128,
                      action_space.n, 0, 0.2, 1e-2, device=device)
     config = Config()
-    agent = DiscreteSACAgent('test', ac, config)
-    agent.load()
+    agent = DiscreteSACAgent('cartpole_sac_discrete', ac, config)
+    agent.load(required=not bool(update))
     agent.n_step = 5
     reward_container = []
     Loss = []
@@ -210,7 +216,7 @@ if __name__ == "__main__":
         r2 = (theta_threshold - np.abs(theta)) / theta_threshold - 0.5
         rewards = 2 * r1 + r2
         episode_lengths += 1
-        truncated = np.logical_or(truncated, episode_lengths > max_steps)
+        truncated = np.logical_or(truncated, episode_lengths >= max_steps)
         done = np.logical_or(terminated, truncated)
         for env_id in range(num_envs):
             if completed_episodes >= total_episodes:
@@ -236,7 +242,8 @@ if __name__ == "__main__":
             j = int(episode_lengths[env_id])
             reward_container.append(episode_reward_sum)
             avg[i % interval] = episode_reward_sum
-            agent.save()
+            if bool(update):
+                agent.save()
             if i % interval == 0 and i != 0:
                 plt.clf()
                 plt.plot(reward_container, label='Reward')

@@ -162,8 +162,8 @@ if __name__ == "__main__":
     obs_dim = observation_space.shape[0]
     Q = QRDuelingDQN(1e-3, obs_dim, 128, action_dim, 51, 0., True, device)
     config = Config()
-    agent = SoftQRDQNAgent('test', Q, config)
-    agent.load()
+    agent = SoftQRDQNAgent('flappybird_softqrdqn', Q, config)
+    agent.load(required=not bool(update))
     agent.n_step = 5
     reward_container = []
     Loss = []
@@ -185,7 +185,7 @@ if __name__ == "__main__":
         actions = agent.action(states, not update)
         next_states, rewards, terminated, truncated, _ = step_env(env, actions, update)
         episode_lengths += 1
-        truncated = np.logical_or(truncated, episode_lengths > max_steps)
+        truncated = np.logical_or(truncated, episode_lengths >= max_steps)
         done = np.logical_or(terminated, truncated)
         for env_id in range(num_envs):
             if completed_episodes >= total_episodes:
@@ -208,7 +208,8 @@ if __name__ == "__main__":
             j = int(episode_lengths[env_id])
             reward_container.append(episode_reward_sum)
             avg[i % interval] = episode_reward_sum
-            agent.save()
+            if bool(update):
+                agent.save()
             if i % interval == 0 and i != 0:
                 plt.clf()
                 plt.plot(reward_container, label='Reward')

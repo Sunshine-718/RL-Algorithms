@@ -156,12 +156,18 @@ class NetworkBase(nn.Module):
 
     def load(self, path=None):
         try:
-            if path is not None:
-                self.load_state_dict(torch.load(path, map_location=self.device))
-        except Exception as _:
-            print('Failed to load parameters.')
+            if path is None:
+                return False
+            state_dict = torch.load(
+                path, map_location=self.device, weights_only=True
+            )
+            self.load_state_dict(state_dict)
+        except FileNotFoundError:
+            print(f'Checkpoint not found: {path}')
+            return False
         finally:
             self.to(self.device)
+        return True
 
 
 class AgentBase:
@@ -176,7 +182,10 @@ class AgentBase:
         self.buffer.n_step = val
 
     def cache(self, state, action, reward, next_state, terminated, truncated):
-        self.buffer.cache_transition(state, action, reward, next_state, terminated, truncated)
+        reward = reward * getattr(self, 'reward_scale', 1.0)
+        self.buffer.cache_transition(
+            state, action, reward, next_state, terminated, truncated
+        )
 
     def process(self):
         self.buffer.process()
@@ -187,12 +196,17 @@ class AgentBase:
         else:
             self.net.save(f'{self.name}_{model}.pt')
 
-    def load(self, model='last'):
+    def load(self, model='last', required=False):
+        path = f'{self.name}_{model}.pt'
         if self.params is not None:
-            self.net.load(f'{self.params}/{self.name}_{model}.pt')
-        else:
-            self.net.load(f'{self.name}_{model}.pt')
+            path = f'{self.params}/{path}'
+        loaded = self.net.load(path)
+        if not loaded:
+            if required:
+                raise FileNotFoundError(path)
+            return False
         self.soft_update(tau=1)
+        return True
 
     def decay_noise(self, zero_noise=False):
         self.noise = max(self.min_noise, self.noise * self.decay) * (1 - bool(zero_noise))

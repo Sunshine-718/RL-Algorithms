@@ -151,8 +151,8 @@ if __name__ == "__main__":
     ac = DDPG(1e-3, observation_space.shape[0], 128,
               action_space.shape[0], 1, 0, True, device)
     config = Config()
-    agent = DDPGAgent('test', ac, config)
-    agent.load()
+    agent = DDPGAgent('pendulum_ddpg', ac, config)
+    agent.load(required=not bool(update))
     agent.n_step = 5
     reward_container = []
     Loss = []
@@ -176,7 +176,7 @@ if __name__ == "__main__":
             env, actions, update
         )
         episode_lengths += 1
-        truncated = np.logical_or(truncated, episode_lengths > max_steps)
+        truncated = np.logical_or(truncated, episode_lengths >= max_steps)
         done = np.logical_or(terminated, truncated)
 
         for env_id in range(num_envs):
@@ -205,7 +205,8 @@ if __name__ == "__main__":
             j = int(episode_lengths[env_id])
             reward_container.append(episode_reward_sum)
             avg[i % interval] = episode_reward_sum
-            agent.save()
+            if bool(update):
+                agent.save()
             if i % interval == 0 and i != 0:
                 plt.clf()
                 plt.plot(reward_container, label='Reward')

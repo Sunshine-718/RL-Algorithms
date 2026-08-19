@@ -83,7 +83,7 @@ class ContinuousPPO(NNBase):
         action = (alpha / (alpha + beta)).cpu()
         if action.numel() == 1:
             return float(action)
-        return action
+        return action.squeeze(0).numpy()
 
     def get_dist_logp(self, state, action=None):
         alpha, beta = self.actor(state)
@@ -202,12 +202,16 @@ if __name__ == "__main__":
     env = gym.make("InvertedPendulum-v5", render_mode='human' if not update else None)
     env = RescaleAction(env, -1, 1)
     env = RecordEpisodeStatistics(env)
+    episode_statistics = env
     # env = NormalizeObservation(env)
     env = NormalizeReward(env)
+    reward_normalizer = env
+    reward_normalizer.update_running_mean = bool(update)
     ac = ContinuousPPO(1e-4, env.observation_space.shape[0], 128, env.action_space.shape[0], 1, 51, True, device=device)
     config = Config()
-    agent = PPOAgent('test', ac, config)
-    agent.load()
+    agent = PPOAgent('inverted_pendulum_qrppo_continuous', ac, config)
+    agent.normalizers = {'reward': reward_normalizer}
+    agent.load(required=not bool(update))
     reward_container = []
     Loss = []
     td_error = []
@@ -229,18 +233,25 @@ if __name__ == "__main__":
             j += 1
             action = agent.action(state, not update)
             next_state, reward, terminated, truncated, info = env.step(action)
+            truncated = bool(truncated or j >= max_steps)
             # next_state = ac.norm(next_state, bool(update))
             # reward = scaler(reward)
             if bool(update):
                 agent.store(state, action, reward, next_state, terminated, truncated)
             state = next_state
-            if terminated or truncated or j > max_steps:
+            if terminated or truncated:
                 break
         if bool(update) and len(agent.buffer) > 2048:
             agent.step()
-        reward_container.append(info['episode']['r'])
-        avg[i % interval] = info['episode']['r']
-        agent.save()
+        episode_reward = float(
+            info.get('episode', {}).get(
+                'r', episode_statistics.episode_returns
+            )
+        )
+        reward_container.append(episode_reward)
+        avg[i % interval] = episode_reward
+        if bool(update):
+            agent.save()
         if i % interval == 0 and i != 0:
             plt.clf()
             plt.plot(reward_container, label='Reward')
@@ -253,5 +264,5 @@ if __name__ == "__main__":
             if res > best_avg:
                 best_avg = res
         iterator.set_description(
-            f'episode reward: {info['episode']['r']: .0f}, avg: {res: .0f}, best avg: {best_avg: .0f}, episode_length: {j}')
+            f"episode reward: {episode_reward: .0f}, avg: {res: .0f}, best avg: {best_avg: .0f}, episode_length: {j}")
     env.close()

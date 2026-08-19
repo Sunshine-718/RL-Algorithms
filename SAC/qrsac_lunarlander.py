@@ -121,6 +121,11 @@ class DiscreteSAC(NetworkBase):
 
 class DiscreteSACAgent(AgentBase):
     def __init__(self, name, ac, config):
+        critic_update_factor = config.critic_update_factor
+        if isinstance(critic_update_factor, bool) or \
+                not isinstance(critic_update_factor, int) or \
+                critic_update_factor <= 0:
+            raise ValueError("critic_update_factor must be a positive integer")
         self.net = ac
         self.target_net = deepcopy(ac)
         self.target_net.computes_grad(False)
@@ -134,7 +139,7 @@ class DiscreteSACAgent(AgentBase):
         self.reward_scale = config.reward_scale
         self._n_step = config.n_step
         self.tau = config.tau
-        self.critic_update_factor = config.critic_update_factor
+        self.critic_update_factor = critic_update_factor
         self.target_entropy = math.log(self.n_actions) * 0.45
         self.qr_tau = torch.linspace(0.5 / self.net.num_quantiles, 1 - 0.5 / self.net.num_quantiles,
                                      self.net.num_quantiles).to(ac.device).view(1, -1)
@@ -164,28 +169,32 @@ class DiscreteSACAgent(AgentBase):
     def td_target(self, reward, next_state, terminated, n):
         _, next_log_probs, next_prob = self.net.actor(next_state)
         next_q1, next_q2 = self.target_net.critic(next_state)
-        next_q = torch.minimum(next_q1, next_q2).mean(dim=-1)
-        next_v = (next_prob * (next_q - self.alpha * next_log_probs)).sum(dim=1, keepdim=True)
+        next_q = torch.minimum(next_q1, next_q2)
+        next_v = (
+            next_prob.unsqueeze(-1)
+            * (next_q - self.alpha * next_log_probs.unsqueeze(-1))
+        ).sum(dim=1)
         return reward + (self.discount ** n) * next_v * (1 - terminated)
 
     def step(self, batch_size=128):
         if batch_size <= len(self.buffer):
             for _ in range(self.epoch):
-                state, action, reward0, next_state, terminated, truncated, n = self.buffer.sample(batch_size)
-                action = action.long()
-                reward = reward0 * self.reward_scale
-                self.target_net.eval()
-                self.net.train()
+                for _ in range(self.critic_update_factor):
+                    state, action, reward0, next_state, terminated, truncated, n = self.buffer.sample(batch_size)
+                    action = action.long()
+                    reward = reward0 * self.reward_scale
+                    self.target_net.eval()
+                    self.net.train()
 
-                td_target = self.td_target(reward, next_state, terminated, n)
-                q1, q2 = self.net.critic(state)
-                self.net.critic_opt.zero_grad()
-                action = action[:, :, None].expand(batch_size, 1, q1.shape[-1])
-                critic_loss = quantile_huber_loss(q1.gather(1, action).squeeze(1), td_target, self.qr_tau) + \
-                    quantile_huber_loss(q2.gather(1, action).squeeze(1), td_target, self.qr_tau)
-                critic_loss.backward()
-                nn.utils.clip_grad_norm_(list(self.net.q1.parameters()) + list(self.net.q2.parameters()), 0.5)
-                self.net.critic_opt.step()
+                    td_target = self.td_target(reward, next_state, terminated, n)
+                    q1, q2 = self.net.critic(state)
+                    self.net.critic_opt.zero_grad()
+                    action = action[:, :, None].expand(batch_size, 1, q1.shape[-1])
+                    critic_loss = quantile_huber_loss(q1.gather(1, action).squeeze(1), td_target, self.qr_tau) + \
+                        quantile_huber_loss(q2.gather(1, action).squeeze(1), td_target, self.qr_tau)
+                    critic_loss.backward()
+                    nn.utils.clip_grad_norm_(list(self.net.q1.parameters()) + list(self.net.q2.parameters()), 0.5)
+                    self.net.critic_opt.step()
 
                 self.net.q1.eval()
                 self.net.q2.eval()
@@ -221,7 +230,7 @@ if __name__ == "__main__":
                      device=device)
     config = Config()
     agent = DiscreteSACAgent('qrsac_lunarlander', ac, config)
-    agent.load()
+    agent.load(required=not bool(update))
     agent.n_step = 5
     reward_container = []
     Loss = []
@@ -271,7 +280,8 @@ if __name__ == "__main__":
             j = int(episode_lengths[env_id])
             reward_container.append(episode_reward_sum)
             avg[i % interval] = episode_reward_sum
-            agent.save()
+            if bool(update):
+                agent.save()
             if i % interval == 0 and i != 0:
                 plt.clf()
                 plt.plot(reward_container, label='Reward')

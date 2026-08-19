@@ -389,7 +389,7 @@ if __name__ == '__main__':
         device=device,
     )
     agent = DRQNAgent('cartpole_drqn', Q, config)
-    agent.load()
+    agent.load(required=not bool(update))
 
     reward_container = []
     loss_container = []

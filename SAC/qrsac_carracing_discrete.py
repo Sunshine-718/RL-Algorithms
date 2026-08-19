@@ -289,12 +289,15 @@ class CarRacingDiscreteQRSACAgent(AgentBase):
             next_state
         )
         next_q1, next_q2 = self.target_net.critic(next_state)
-        next_q = torch.minimum(next_q1, next_q2).mean(dim=-1)
+        next_q = torch.minimum(next_q1, next_q2)
         temperature = self.net.alpha.detach().exp()
         next_value = (
-            next_probabilities
-            * (next_q - temperature * next_log_probabilities)
-        ).sum(dim=1, keepdim=True)
+            next_probabilities.unsqueeze(-1)
+            * (
+                next_q
+                - temperature * next_log_probabilities.unsqueeze(-1)
+            )
+        ).sum(dim=1)
         discount = torch.pow(self.discount, n)
         return reward + discount * next_value * (1.0 - terminated)
 
@@ -433,7 +436,7 @@ if __name__ == "__main__":
     agent = CarRacingDiscreteQRSACAgent(
         "qrsac_carracing_discrete", network, config
     )
-    agent.load()
+    agent.load(required=not bool(update))
 
     reward_container = []
     max_steps = 1_000

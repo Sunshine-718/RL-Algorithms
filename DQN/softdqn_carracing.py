@@ -234,7 +234,7 @@ if __name__ == "__main__":
     agent = CarRacingSoftDQNAgent(
         "softdqn_carracing", q_network, config
     )
-    agent.load()
+    agent.load(required=not bool(update))
 
     reward_container = []
     max_steps = 1_000
@@ -269,7 +269,7 @@ if __name__ == "__main__":
                     (
                         np.asarray(states[env_id]).copy(),
                         int(actions[env_id]),
-                        float(rewards[env_id]) * agent.reward_scale,
+                        float(rewards[env_id]),
                         np.asarray(next_states[env_id]).copy(),
                         bool(terminated[env_id]),
                         bool(truncated[env_id]),

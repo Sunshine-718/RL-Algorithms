@@ -110,6 +110,11 @@ class ContinuousSAC(NetworkBase):
 
 class ContinuousSACAgent(AgentBase):
     def __init__(self, name, ac, config):
+        critic_update_factor = config.critic_update_factor
+        if isinstance(critic_update_factor, bool) or \
+                not isinstance(critic_update_factor, int) or \
+                critic_update_factor <= 0:
+            raise ValueError("critic_update_factor must be a positive integer")
         self.net = ac
         self.target_net = deepcopy(ac)
         self.target_net.computes_grad(False)
@@ -124,7 +129,7 @@ class ContinuousSACAgent(AgentBase):
         self.reward_scale = config.reward_scale
         self._n_step = config.n_step
         self.tau = config.tau
-        self.critic_update_factor = config.critic_update_factor
+        self.critic_update_factor = critic_update_factor
         self.actor_quantile_fraction = config.actor_quantile_fraction
         if not 0 < self.actor_quantile_fraction <= 1:
             raise ValueError("actor_quantile_fraction must be in (0, 1]")
@@ -166,26 +171,29 @@ class ContinuousSACAgent(AgentBase):
         metrics = None
         if batch_size <= len(self.buffer):
             for _ in range(self.epoch):
-                state, action, reward0, next_state, terminated, truncated, n = self.buffer.sample(batch_size)
-                reward = reward0 * self.reward_scale
-                self.target_net.eval()
-                self.net.train()
+                critic_step_ok = True
+                for _ in range(self.critic_update_factor):
+                    state, action, reward0, next_state, terminated, truncated, n = self.buffer.sample(batch_size)
+                    reward = reward0 * self.reward_scale
+                    self.target_net.eval()
+                    self.net.train()
 
-                td_target = self.td_target(reward, next_state, terminated, n)
-                q1, q2 = self.net.critic(state, action)
-                self.net.critic_opt.zero_grad()
-                critic_loss = quantile_huber_loss(q1, td_target, self.qr_tau) + \
-                    quantile_huber_loss(q2, td_target, self.qr_tau)
-                critic_step_ok = bool(torch.isfinite(critic_loss))
-                if critic_step_ok:
-                    critic_loss.backward()
-                    critic_grad_norm = nn.utils.clip_grad_norm_(
-                        list(self.net.q1.parameters()) + list(self.net.q2.parameters()), 0.5
-                    )
-                    critic_step_ok = bool(torch.isfinite(critic_grad_norm))
-                    if critic_step_ok:
-                        self.net.critic_opt.step()
-                self.net.critic_opt.zero_grad()
+                    td_target = self.td_target(reward, next_state, terminated, n)
+                    q1, q2 = self.net.critic(state, action)
+                    self.net.critic_opt.zero_grad()
+                    critic_loss = quantile_huber_loss(q1, td_target, self.qr_tau) + \
+                        quantile_huber_loss(q2, td_target, self.qr_tau)
+                    current_critic_step_ok = bool(torch.isfinite(critic_loss))
+                    if current_critic_step_ok:
+                        critic_loss.backward()
+                        critic_grad_norm = nn.utils.clip_grad_norm_(
+                            list(self.net.q1.parameters()) + list(self.net.q2.parameters()), 0.5
+                        )
+                        current_critic_step_ok = bool(torch.isfinite(critic_grad_norm))
+                        if current_critic_step_ok:
+                            self.net.critic_opt.step()
+                    self.net.critic_opt.zero_grad()
+                    critic_step_ok = critic_step_ok and current_critic_step_ok
 
                 actor_loss = torch.zeros((), device=state.device)
                 alpha_loss = torch.zeros((), device=state.device)
@@ -253,8 +261,8 @@ if __name__ == "__main__":
                        256, action_space.shape[0], 1, 0, 51, 0.2, 1e-2,
                        device=device)
     config = Config()
-    agent = ContinuousSACAgent('test', ac, config)
-    agent.load()
+    agent = ContinuousSACAgent('bipedalwalker_qrsac_continuous', ac, config)
+    agent.load(required=not bool(update))
     agent.n_step = 10
     reward_container = []
     Loss = []
@@ -279,7 +287,7 @@ if __name__ == "__main__":
         )
         rewards = np.where(rewards == -100, -10, rewards)
         episode_lengths += 1
-        truncated = np.logical_or(truncated, episode_lengths > max_steps)
+        truncated = np.logical_or(truncated, episode_lengths >= max_steps)
         done = np.logical_or(terminated, truncated)
         for env_id in range(num_envs):
             if completed_episodes >= total_episodes:
@@ -305,7 +313,8 @@ if __name__ == "__main__":
             j = int(episode_lengths[env_id])
             reward_container.append(episode_reward_sum)
             avg[i % interval] = episode_reward_sum
-            agent.save() if update else None
+            if bool(update):
+                agent.save()
             if i % interval == 0 and i != 0:
                 plt.clf()
                 plt.plot(reward_container, label='Reward')

@@ -445,7 +445,7 @@ if __name__ == "__main__":
     agent = CarRacingQRSACAgent(
         "qrsac_carracing", network, config
     )
-    agent.load()
+    agent.load(required=not bool(update))
 
     reward_container = []
     max_steps = 1_000

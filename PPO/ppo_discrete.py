@@ -173,8 +173,8 @@ if __name__ == "__main__":
     # env = RescaleAction(env, -1, 1)
     ac = DiscretePPO(3e-4, env.observation_space.shape[0], 128, env.action_space.n, True, device)
     config = Config()
-    agent = PPOAgent('test', ac, config)
-    agent.load()
+    agent = PPOAgent('cartpole_ppo_discrete', ac, config)
+    agent.load(required=not bool(update))
     reward_container = []
     Loss = []
     td_error = []
@@ -194,6 +194,7 @@ if __name__ == "__main__":
             j += 1
             action = agent.action(state, not update)
             next_state, reward, terminated, truncated, _ = env.step(action)
+            truncated = bool(truncated or j >= max_steps)
             x, x_dot, theta, theta_dot = next_state
             r1 = (env.x_threshold - abs(x)) / env.x_threshold - 0.8
             r2 = (env.theta_threshold_radians - abs(theta)) / env.theta_threshold_radians - 0.5
@@ -202,13 +203,14 @@ if __name__ == "__main__":
                 agent.store(state, action, reward, next_state, terminated, truncated)
             episode_reward_sum += reward
             state = next_state
-            if terminated or truncated or j > max_steps:
+            if terminated or truncated:
                 break
         if bool(update) and len(agent.buffer) > 100:
             agent.step()
         reward_container.append(episode_reward_sum)
         avg[i % interval] = episode_reward_sum
-        agent.save()
+        if bool(update):
+            agent.save()
         if i % interval == 0 and i != 0:
             plt.clf()
             plt.plot(reward_container, label='Reward')

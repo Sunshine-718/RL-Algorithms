@@ -308,7 +308,7 @@ if __name__ == "__main__":
     agent = BreakoutSoftQRDQNAgent(
         "softqrdqn_breakout", q_network, config
     )
-    agent.load()
+    agent.load(required=not bool(update))
 
     reward_container = []
     interval = 10
