@@ -40,7 +40,7 @@ from common import (
 class Config:
     discount: float = 0.99
     params: str = "./params"
-    tau: float = 3e-2
+    tau: float = 5e-3
     # State and next_state together use about 3.43 GiB at this capacity.
     capacity: int = 100_000
     epoch: int = 10

@@ -41,7 +41,7 @@ from image_replaybuffer import ImageReplayBuffer
 class Config:
     discount: float = 0.99
     params: str = "./params"
-    tau: float = 3e-2
+    tau: float = 5e-3
     # Two uint8 frame stacks (state and next_state) use about 3.43 GiB here.
     capacity: int = 100_000
     epoch: int = 30
