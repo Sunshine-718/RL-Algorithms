@@ -85,41 +85,6 @@ def flush_episode(agent, transitions):
     transitions.clear()
 
 
-def store_n_step_transition(agent, transition_cache, force=False):
-    if not transition_cache:
-        return False
-    if len(transition_cache) < agent.n_step and not force:
-        return False
-
-    horizon = min(agent.n_step, len(transition_cache))
-    reward = sum(
-        transition_cache[index][2] * agent.discount ** index
-        for index in range(horizon)
-    )
-    state, action = transition_cache[0][:2]
-    next_state, terminated, truncated = transition_cache[horizon - 1][3:]
-    agent.buffer.store(
-        state,
-        action,
-        reward,
-        next_state,
-        terminated,
-        truncated,
-        horizon,
-    )
-    transition_cache.pop(0)
-    return True
-
-
-def flush_n_step_transitions(agent, transition_cache):
-    stored = 0
-    while transition_cache:
-        stored += int(
-            store_n_step_transition(agent, transition_cache, force=True)
-        )
-    return stored
-
-
 def discrete_temperature_loss(
     log_alpha, log_probabilities, probabilities, target_entropy
 ):
