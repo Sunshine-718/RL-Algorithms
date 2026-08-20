@@ -41,7 +41,7 @@ from image_replaybuffer import ImageReplayBuffer
 class Config:
     discount: float = 0.99
     params: str = "./params"
-    tau: float = 3e-2
+    tau: float = 5e-3
     # State and next-state frame stacks use about 26.29 GiB as uint8.
     capacity: int = 500_000
     epoch: int = 30
@@ -49,8 +49,8 @@ class Config:
     reward_scale: float = 1.0
     n_step: int = 5
     noise: float = 0.5
-    min_noise: float = 0.1
-    decay: float = 0.99
+    min_noise: float = 0.01
+    decay: float = 0.998
 
 
 class BreakoutQRDQNAgent(DQNAgentBase):

@@ -64,8 +64,12 @@ def make_agent(
 
 
 class BreakoutQRDQNTest(unittest.TestCase):
-    def test_default_noise_starts_at_half(self):
-        self.assertEqual(Config().noise, 0.5)
+    def test_default_exploration_and_target_update_config(self):
+        config = Config()
+        self.assertEqual(config.noise, 0.5)
+        self.assertEqual(config.min_noise, 0.01)
+        self.assertEqual(config.decay, 0.998)
+        self.assertEqual(config.tau, 0.005)
 
     def test_double_q_target_selects_online_action_and_target_quantiles(self):
         agent = make_agent(discount=0.5, n_step=2)
@@ -95,8 +99,8 @@ class BreakoutQRDQNTest(unittest.TestCase):
     def test_noise_does_not_decay_when_selecting_actions(self):
         agent = make_agent(
             noise=0.5,
-            min_noise=0.1,
-            decay=0.99,
+            min_noise=0.01,
+            decay=0.998,
         )
         states = np.zeros((4, 1), dtype=np.uint8)
 
@@ -108,7 +112,7 @@ class BreakoutQRDQNTest(unittest.TestCase):
 
     def test_step_updates_once_per_epoch_and_reports_metrics(self):
         agent = make_agent(
-            epoch=3, noise=0.5, min_noise=0.1, decay=0.99
+            epoch=3, noise=0.5, min_noise=0.01, decay=0.998
         )
         for index in range(2):
             state = np.asarray([index], dtype=np.uint8)
@@ -129,7 +133,7 @@ class BreakoutQRDQNTest(unittest.TestCase):
         self.assertTrue(np.isfinite(loss))
         self.assertTrue(agent.last_training_metrics["updated"])
         self.assertEqual(agent.last_training_metrics["buffer_size"], 2)
-        self.assertAlmostEqual(agent.noise, 0.495)
+        self.assertAlmostEqual(agent.noise, 0.499)
 
     def test_cnn_outputs_quantiles_for_each_action(self):
         network = BreakoutQRDuelingNetwork(

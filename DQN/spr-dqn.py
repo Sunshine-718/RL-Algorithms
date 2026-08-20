@@ -21,14 +21,14 @@ import flappy_bird_gymnasium
 class Config:
     discount: float = 0.99
     params: str = './params'
-    tau: float = 3e-2
+    tau: float = 5e-3
     capacity: int = 1_000_000
     epoch: int = 30
     reward_scale: float = 1.
     n_step: int = 5
     noise: float = 0.02
-    min_noise: float = 0.02
-    decay: float = 0.99
+    min_noise: float = 0.01
+    decay: float = 0.998
 
 
 class SPRReplayBuffer(ReplayBuffer):
