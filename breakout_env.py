@@ -9,6 +9,7 @@ FRAME_SKIP = 4
 STACK_SIZE = 4
 REPEAT_ACTION_PROBABILITY = 0.0
 LIFE_LOSS_PENALTY = -5.0
+AGENT_ACTION_MEANINGS = ("NOOP", "RIGHT", "LEFT")
 
 
 gym.register_envs(ale_py)
@@ -120,6 +121,30 @@ class FireReset(gym.Wrapper):
         return observation, reward, terminated, truncated, info
 
 
+class RemoveFireAction(gym.ActionWrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        raw_action_meanings = self.unwrapped.get_action_meanings()
+        try:
+            self.action_map = tuple(
+                raw_action_meanings.index(action_meaning)
+                for action_meaning in AGENT_ACTION_MEANINGS
+            )
+        except ValueError as error:
+            raise ValueError(
+                "Breakout action space must provide NOOP, RIGHT and LEFT"
+            ) from error
+        self.action_space = gym.spaces.Discrete(len(self.action_map))
+
+    def action(self, action):
+        if not self.action_space.contains(action):
+            raise ValueError(f"invalid agent action: {action}")
+        return self.action_map[int(action)]
+
+    def get_action_meanings(self):
+        return list(AGENT_ACTION_MEANINGS)
+
+
 def wrap_breakout_observation(
     env, terminal_on_life_loss=False, life_loss_penalty=0.0
 ):
@@ -137,6 +162,7 @@ def wrap_breakout_observation(
         terminal_on_life_loss=terminal_on_life_loss,
         life_loss_penalty=life_loss_penalty,
     )
+    env = RemoveFireAction(env)
     return gym.wrappers.FrameStackObservation(env, stack_size=STACK_SIZE)
 
 

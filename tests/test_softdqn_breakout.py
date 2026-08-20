@@ -282,10 +282,28 @@ class BreakoutSoftDQNTest(unittest.TestCase):
         )
         self.assertEqual(make.call_args.kwargs["frameskip"], 1)
 
+    def test_agent_action_space_excludes_fire(self):
+        base_env = FakeBreakoutEnv()
+        env = breakout_env.RemoveFireAction(
+            breakout_env.FireReset(base_env)
+        )
+        env.reset()
+
+        self.assertEqual(env.action_space.n, 3)
+        self.assertEqual(
+            env.get_action_meanings(), ["NOOP", "RIGHT", "LEFT"]
+        )
+        for agent_action in range(env.action_space.n):
+            env.step(agent_action)
+
+        self.assertEqual(base_env.actions, [1, 0, 2, 3])
+        with self.assertRaises(ValueError):
+            env.step(3)
+
     def test_cnn_outputs_one_scalar_per_action(self):
         network = BreakoutDuelingNetwork(
             lr=1e-4,
-            num_actions=4,
+            num_actions=3,
             device="cpu",
         )
         image = torch.randint(
@@ -300,8 +318,8 @@ class BreakoutSoftDQNTest(unittest.TestCase):
             image.unsqueeze(0).repeat(2, 1, 1, 1).float() / 255.0
         )
 
-        self.assertEqual(uint8_output.shape, (1, 4))
-        self.assertEqual(float_output.shape, (2, 4))
+        self.assertEqual(uint8_output.shape, (1, 3))
+        self.assertEqual(float_output.shape, (2, 3))
         torch.testing.assert_close(uint8_output[0], float_output[0])
         self.assertTrue(torch.isfinite(float_output).all())
 

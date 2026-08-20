@@ -15,6 +15,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from breakout_env import (
+    AGENT_ACTION_MEANINGS,
     FRAME_SKIP,
     LIFE_LOSS_PENALTY,
     OBSERVATION_SHAPE,
@@ -47,9 +48,9 @@ class Config:
     learning_starts: int = 20_000
     reward_scale: float = 1.0
     n_step: int = 5
-    epsilon_start: float = 1.0
-    epsilon_end: float = 0.01
-    epsilon_decay_steps: int = 1_000_000
+    noise: float = 0.5
+    min_noise: float = 0.1
+    decay: float = 0.99
 
 
 class BreakoutQRDQNAgent(DQNAgentBase):
@@ -67,13 +68,6 @@ class BreakoutQRDQNAgent(DQNAgentBase):
             q_network.device,
         )
 
-        if not 0.0 <= config.epsilon_end <= config.epsilon_start <= 1.0:
-            raise ValueError(
-                "epsilon must satisfy 0 <= end <= start <= 1"
-            )
-        if config.epsilon_decay_steps <= 0:
-            raise ValueError("epsilon_decay_steps must be positive")
-
         self.name = name
         self.n_actions = q_network.action_dim
         self.params = config.params
@@ -83,10 +77,9 @@ class BreakoutQRDQNAgent(DQNAgentBase):
         self.reward_scale = config.reward_scale
         self._n_step = config.n_step
         self.tau = config.tau
-        self.epsilon_start = config.epsilon_start
-        self.epsilon_end = config.epsilon_end
-        self.epsilon_decay_steps = config.epsilon_decay_steps
-        self.environment_steps = 0
+        self.noise = config.noise
+        self.min_noise = config.min_noise
+        self.decay = config.decay
         self.qr_tau = torch.linspace(
             0.5 / q_network.num_quantiles,
             1.0 - 0.5 / q_network.num_quantiles,
@@ -95,16 +88,6 @@ class BreakoutQRDQNAgent(DQNAgentBase):
         ).view(1, -1)
         self.last_training_metrics = {}
         self.soft_update(tau=1.0)
-
-    @property
-    def epsilon(self):
-        progress = min(
-            self.environment_steps / self.epsilon_decay_steps,
-            1.0,
-        )
-        return self.epsilon_start + progress * (
-            self.epsilon_end - self.epsilon_start
-        )
 
     @torch.no_grad()
     def action(self, state, deterministic=False):
@@ -123,13 +106,11 @@ class BreakoutQRDQNAgent(DQNAgentBase):
         if deterministic:
             actions = greedy_actions
         else:
-            epsilon = self.epsilon
-            explore = np.random.random(len(greedy_actions)) < epsilon
+            explore = np.random.random(len(greedy_actions)) < self.noise
             random_actions = np.random.randint(
                 0, self.n_actions, size=len(greedy_actions)
             )
             actions = np.where(explore, random_actions, greedy_actions)
-            self.environment_steps += len(greedy_actions)
         return int(actions[0]) if single_state else actions
 
     @torch.no_grad()
@@ -188,6 +169,7 @@ class BreakoutQRDQNAgent(DQNAgentBase):
             self.net.opt.step()
             self.soft_update()
 
+        self.decay_noise()
         self.training_metrics(loss)
         return float(loss.detach().item())
 
@@ -199,8 +181,7 @@ class BreakoutQRDQNAgent(DQNAgentBase):
         metrics = {
             "updated": loss is not None,
             "loss": loss,
-            "epsilon": self.epsilon,
-            "environment_steps": self.environment_steps,
+            "noise": self.noise,
             "buffer_size": len(self.buffer),
             "buffer_capacity": int(self.buffer.capacity),
         }
@@ -212,42 +193,10 @@ class BreakoutQRDQNAgent(DQNAgentBase):
         loss = metrics["loss"]
         loss_text = "n/a" if loss is None else f"{loss:.4f}"
         return (
-            f"loss: {loss_text}, epsilon: {metrics['epsilon']:.4f}, "
-            f"steps: {metrics['environment_steps']:,}, "
+            f"loss: {loss_text}, noise: {metrics['noise']:.4f}, "
             f"replay: {metrics['buffer_size']:,}/"
             f"{metrics['buffer_capacity']:,}"
         )
-
-    def save(self, model="last"):
-        path = f"{self.name}_{model}.pt"
-        if self.params is not None:
-            path = f"{self.params}/{path}"
-        self.net.save(
-            path,
-            {"environment_steps": int(self.environment_steps)},
-        )
-
-    def load(self, model="last", required=False):
-        path = f"{self.name}_{model}.pt"
-        if self.params is not None:
-            path = f"{self.params}/{path}"
-        checkpoint = self.net.load(path)
-        if checkpoint is False:
-            if required:
-                raise FileNotFoundError(path)
-            return False
-        environment_steps = checkpoint.get("environment_steps", 0)
-        if (
-            isinstance(environment_steps, bool)
-            or not isinstance(environment_steps, int)
-            or environment_steps < 0
-        ):
-            raise ValueError(
-                "checkpoint environment_steps must be a non-negative integer"
-            )
-        self.environment_steps = environment_steps
-        self.soft_update(tau=1.0)
-        return True
 
     def soft_update(self, tau=None):
         super().soft_update(tau)
@@ -278,7 +227,7 @@ if __name__ == "__main__":
         device=device,
     )
     config = Config()
-    agent_name = "qrdqn_breakout_v1"
+    agent_name = "qrdqn_breakout_v2"
     agent = BreakoutQRDQNAgent(agent_name, q_network, config)
     checkpoint_loaded = agent.load(required=not bool(update))
     batch_size = 128
@@ -287,6 +236,7 @@ if __name__ == "__main__":
         f"model={agent_name}, checkpoint_loaded={checkpoint_loaded}, "
         f"device={device}, envs={num_envs}, "
         f"observation={observation_space.shape}, actions={action_space.n}, "
+        f"action_meanings={'/'.join(AGENT_ACTION_MEANINGS)}, "
         f"frame_skip={FRAME_SKIP}, stack_size={STACK_SIZE}, "
         f"repeat_action_probability={REPEAT_ACTION_PROBABILITY}, "
         f"terminal_on_life_loss={bool(update)}, "
@@ -297,9 +247,8 @@ if __name__ == "__main__":
         f"learning_starts={config.learning_starts:,}, epoch={config.epoch}, "
         f"n_step={config.n_step}, discount={config.discount}, "
         f"reward_scale={config.reward_scale}, tau={config.tau}, "
-        f"epsilon={agent.epsilon:.4f}, "
-        f"epsilon_end={config.epsilon_end}, "
-        f"epsilon_decay_steps={config.epsilon_decay_steps:,}"
+        f"noise={agent.noise:.4f}, min_noise={config.min_noise}, "
+        f"decay={config.decay}"
     )
 
     reward_container = []

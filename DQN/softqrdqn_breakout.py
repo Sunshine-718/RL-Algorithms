@@ -16,6 +16,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from breakout_env import (
+    AGENT_ACTION_MEANINGS,
     FRAME_SKIP,
     LIFE_LOSS_PENALTY,
     OBSERVATION_SHAPE,
@@ -201,7 +202,7 @@ if __name__ == "__main__":
         device=device,
     )
     config = Config()
-    agent_name = "softqrdqn_breakout_v5"
+    agent_name = "softqrdqn_breakout_v6"
     agent = BreakoutSoftQRDQNAgent(
         agent_name, q_network, config
     )
@@ -212,6 +213,7 @@ if __name__ == "__main__":
         f"model={agent_name}, checkpoint_loaded={checkpoint_loaded}, "
         f"device={device}, envs={num_envs}, "
         f"observation={observation_space.shape}, actions={action_space.n}, "
+        f"action_meanings={'/'.join(AGENT_ACTION_MEANINGS)}, "
         f"frame_skip={FRAME_SKIP}, stack_size={STACK_SIZE}, "
         f"repeat_action_probability={REPEAT_ACTION_PROBABILITY}, "
         f"terminal_on_life_loss={bool(update)}, "
