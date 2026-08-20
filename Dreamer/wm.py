@@ -150,3 +150,117 @@ class RSSM(nn.Module):
             torch.cat([stochastic_state, previous_action], dim=-1)
         )
         hidden_state = self.gru(transition, previous["hidden_state"])
+        logits = self.prior(hidden_state).reshape(-1, self.stochastic_dim, self.stochastic_classes)
+        return {
+            "hidden_state": hidden_state,
+            "stochastic_state": self._sample(logits, sample),
+            "logits": logits
+        }
+
+    def obs_step(self, previous, previous_action, embed, is_first=None, sample=True):
+        if is_first is not None:
+            keep = 1.0 - is_first.reshape(-1, 1)
+            previous = {
+                key: value * keep.reshape(keep.shape[0], *([1] * value.ndim - 1))
+                for key, value in previous.items()
+            }
+            previous_action = previous_action * keep
+
+        prior = self.img_step(previous, previous_action, sample)
+        logits = self.posterior(
+            torch.cat([prior["hidden_state"], embed], dim=-1)
+        ).reshape(-1, self.stochastic_dim, self.stochastic_classes)
+        posterior = {
+            "hidden_state": prior["hidden_state"],
+            "stochastic_state": self._sample(logits, sample),
+            "logits": logits
+        }
+        return posterior, prior
+
+    def observe(self, embed, action, is_first, state=None, sample=True):
+        batch_size, sequence_length = action.shape[:2]
+        state = state or self.initial(batch_size, action.device)
+        posts, priors = [], []
+        for index in range(sequence_length):
+            state, prior = self.obs_step(state, action[:, index], embed[:, index], is_first[:, index], sample)
+            posts.append(state)
+            priors.append(prior)
+        return stack_states(posts), stack_states(priors)
+
+    def _sample(self, logits, sample):
+        probablilties = torch.softmax(logits, dim=-1)
+        if sample:
+            index = Categorical(logits=logits).sample()
+        else:
+            index = logits.argmax(dim=-1)
+        hard = F.one_hot(index, self.stochastic_classes).to(probablilties.dtype)
+        return hard + probablilties - probablilties.detach()
+
+
+class WorldModel(nn.Module):
+    def __init__(self, action_dim, config):
+        super().__init__()
+        self.config = config
+        self.encoder = ImageEncoder(config.cnn_depth)
+        self.rssm = RSSM(
+            action_dim,
+            self.encoder.output_dim,
+            config.hidden_state_dim,
+            config.stochastic_dim,
+            config.stochastic_classes,
+            config.rssm_mlp_dim,
+        )
+        feature_dim = self.rssm.feature_dim
+        self.decoder = ImageDecoder(feature_dim, config.cnn_depth)
+        self.reward = nn.Sequential(
+            nn.Linear(feature_dim, config.hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(config.hidden_dim, config.hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(config.hidden_dim, config.hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(config.hidden_dim, config.hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(config.hidden_dim, 1),
+        )
+        self.continue_head = nn.Sequential(
+            nn.Linear(feature_dim, config.hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(config.hidden_dim, config.hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(config.hidden_dim, config.hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(config.hidden_dim, config.hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(config.hidden_dim, 1),
+        )
+
+    def loss(self, batch):
+        observation = batch["observation"]
+        embed = self.encoder(observation)
+        posterior, prior = self.rssm.observe(
+            embed, batch["action"], batch["is_first"]
+        )
+        feature = self.rssm.get_feature(posterior)
+        reconstruction = self.decoder(feature)
+        reward = self.reward(feature)
+        continue_logits = self.continue_head(feature)
+        # 片段首帧没有片段内的前序 transition，只参与 observation 和 KL 学习。
+        transition_mask = 1.0 - batch["is_first"]
+        # 奖励和 continue loss 按有效 transition 数取平均，并避免除零。
+        denominator = transition_mask.sum().clamp_min(1.0)
+
+        pixel_loss = F.mse_loss(
+            reconstruction,
+            observation,
+            reduction="none",
+        )
+        reconstruction_loss = (
+            0.5 * pixel_loss.sum(dim=(-3, -2, -1))
+        ).mean()
+        reward_error = F.mse_loss(
+            reward,
+            batch["reward"],
+            reduction="none"
+        )
+        reward_loss = (0.5 * reward_error * transition_mask).sum() / denominator
