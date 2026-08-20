@@ -197,6 +197,13 @@ class BreakoutQRDQNAgent(DQNAgentBase):
             f"{metrics['buffer_capacity']:,}"
         )
 
+    def soft_update(self, tau=None):
+        super().soft_update(tau)
+        for target_buffer, buffer in zip(
+            self.target_net.buffers(), self.net.buffers()
+        ):
+            target_buffer.copy_(buffer)
+
 
 if __name__ == "__main__":
     update = 1
