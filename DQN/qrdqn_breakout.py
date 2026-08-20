@@ -7,7 +7,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.distributions import Categorical
 from tqdm.auto import tqdm
 
 
@@ -25,14 +24,14 @@ from breakout_env import (
 )
 from breakout_network import BreakoutQRDuelingNetwork
 from common import (
-    SoftDQNAgentBase,
+    DQNAgentBase,
     flush_n_step_transitions,
+    quantile_huber_loss,
     reset_done_envs,
     reset_env,
     single_spaces,
     store_n_step_transition,
     step_env,
-    weighted_quantile_huber_loss,
 )
 from image_replaybuffer import ImageReplayBuffer
 
@@ -48,11 +47,12 @@ class Config:
     learning_starts: int = 20_000
     reward_scale: float = 1.0
     n_step: int = 5
-    alpha: float = 0.1
-    alpha_lr: float = 1e-2
+    epsilon_start: float = 1.0
+    epsilon_end: float = 0.01
+    epsilon_decay_steps: int = 1_000_000
 
 
-class BreakoutSoftQRDQNAgent(SoftDQNAgentBase):
+class BreakoutQRDQNAgent(DQNAgentBase):
     def __init__(self, name, q_network, config):
         self.net = q_network
         self.target_net = deepcopy(q_network)
@@ -67,6 +67,13 @@ class BreakoutSoftQRDQNAgent(SoftDQNAgentBase):
             q_network.device,
         )
 
+        if not 0.0 <= config.epsilon_end <= config.epsilon_start <= 1.0:
+            raise ValueError(
+                "epsilon must satisfy 0 <= end <= start <= 1"
+            )
+        if config.epsilon_decay_steps <= 0:
+            raise ValueError("epsilon_decay_steps must be positive")
+
         self.name = name
         self.n_actions = q_network.action_dim
         self.params = config.params
@@ -76,15 +83,28 @@ class BreakoutSoftQRDQNAgent(SoftDQNAgentBase):
         self.reward_scale = config.reward_scale
         self._n_step = config.n_step
         self.tau = config.tau
-        self.configure_alpha(config.alpha, lr=config.alpha_lr)
-        self.target_entropy = float(np.log(q_network.action_dim)) * 0.45
+        self.epsilon_start = config.epsilon_start
+        self.epsilon_end = config.epsilon_end
+        self.epsilon_decay_steps = config.epsilon_decay_steps
+        self.environment_steps = 0
         self.qr_tau = torch.linspace(
             0.5 / q_network.num_quantiles,
             1.0 - 0.5 / q_network.num_quantiles,
             q_network.num_quantiles,
             device=q_network.device,
         ).view(1, -1)
+        self.last_training_metrics = {}
         self.soft_update(tau=1.0)
+
+    @property
+    def epsilon(self):
+        progress = min(
+            self.environment_steps / self.epsilon_decay_steps,
+            1.0,
+        )
+        return self.epsilon_start + progress * (
+            self.epsilon_end - self.epsilon_start
+        )
 
     @torch.no_grad()
     def action(self, state, deterministic=False):
@@ -94,14 +114,22 @@ class BreakoutSoftQRDQNAgent(SoftDQNAgentBase):
         if single_state:
             state_tensor = state_tensor.unsqueeze(0)
 
+        training = self.net.training
         self.net.eval()
-        q_value = self.net(state_tensor).mean(dim=-1).cpu()
+        greedy_actions = self.net(state_tensor).mean(dim=-1).argmax(dim=-1)
+        greedy_actions = greedy_actions.cpu().numpy()
+        self.net.train(training)
+
         if deterministic:
-            actions = q_value.argmax(dim=-1).numpy()
+            actions = greedy_actions
         else:
-            probabilities = torch.softmax(q_value / self.alpha, dim=-1)
-            actions = Categorical(probabilities).sample().numpy()
-        self.net.train()
+            epsilon = self.epsilon
+            explore = np.random.random(len(greedy_actions)) < epsilon
+            random_actions = np.random.randint(
+                0, self.n_actions, size=len(greedy_actions)
+            )
+            actions = np.where(explore, random_actions, greedy_actions)
+            self.environment_steps += len(greedy_actions)
         return int(actions[0]) if single_state else actions
 
     @torch.no_grad()
@@ -110,26 +138,21 @@ class BreakoutSoftQRDQNAgent(SoftDQNAgentBase):
         self.net.eval()
         online_quantiles = self.net(next_state)
         self.net.train(training)
-        target_quantiles = self.target_net(next_state)
-        log_probabilities = torch.log_softmax(
-            online_quantiles.mean(dim=-1) / self.alpha,
-            dim=1,
+        next_action = online_quantiles.mean(dim=-1).argmax(
+            dim=1, keepdim=True
         )
-        probabilities = log_probabilities.exp()
-        soft_target_atoms = (
-            target_quantiles
-            - self.alpha * log_probabilities.unsqueeze(-1)
+        next_action = next_action.unsqueeze(-1).expand(
+            -1, 1, self.net.num_quantiles
         )
-        target_atoms = (
-            reward.unsqueeze(-1)
-            + torch.pow(self.discount, n).unsqueeze(-1)
-            * soft_target_atoms
-            * (1.0 - terminated).unsqueeze(-1)
+        target_quantiles = self.target_net(next_state).gather(
+            1, next_action
+        ).squeeze(1)
+        return (
+            reward
+            + torch.pow(self.discount, n)
+            * target_quantiles
+            * (1.0 - terminated)
         )
-        atom_weights = probabilities.unsqueeze(-1).expand_as(
-            target_quantiles
-        ) / self.net.num_quantiles
-        return target_atoms.flatten(1), atom_weights.flatten(1)
 
     def loss(self, state, action, reward, next_state, terminated, truncated,
              n):
@@ -141,36 +164,90 @@ class BreakoutSoftQRDQNAgent(SoftDQNAgentBase):
         chosen_quantiles = quantiles.gather(
             1, action.long()
         ).squeeze(1)
-        target_quantiles, target_weights = self.td_target(
+        target_quantiles = self.td_target(
             reward, next_state, terminated, n
         )
-        loss = weighted_quantile_huber_loss(
+        return quantile_huber_loss(
             chosen_quantiles,
             target_quantiles,
-            target_weights,
             self.qr_tau,
         )
-        return loss, quantiles.detach()
 
     def step(self, batch_size=128):
         if len(self.buffer) < max(batch_size, self.learning_starts):
             self.training_metrics()
-            return {}
+            return None
 
         for _ in range(self.epoch):
             self.net.opt.zero_grad()
             self.target_net.eval()
             self.net.train()
-            loss, quantiles = self.loss(*self.buffer.sample(batch_size))
+            loss = self.loss(*self.buffer.sample(batch_size))
             loss.backward()
             nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
             self.net.opt.step()
-
-            entropy = self._update_alpha(quantiles)
             self.soft_update()
 
-        metrics = self.training_metrics(loss, entropy)
-        return {"loss": metrics["loss"], "alpha": metrics["alpha"]}
+        self.training_metrics(loss)
+        return float(loss.detach().item())
+
+    def training_metrics(self, loss=None):
+        if isinstance(loss, torch.Tensor):
+            loss = float(loss.detach().item())
+        elif loss is not None:
+            loss = float(loss)
+        metrics = {
+            "updated": loss is not None,
+            "loss": loss,
+            "epsilon": self.epsilon,
+            "environment_steps": self.environment_steps,
+            "buffer_size": len(self.buffer),
+            "buffer_capacity": int(self.buffer.capacity),
+        }
+        self.last_training_metrics = metrics
+        return metrics
+
+    @staticmethod
+    def format_training_metrics(metrics):
+        loss = metrics["loss"]
+        loss_text = "n/a" if loss is None else f"{loss:.4f}"
+        return (
+            f"loss: {loss_text}, epsilon: {metrics['epsilon']:.4f}, "
+            f"steps: {metrics['environment_steps']:,}, "
+            f"replay: {metrics['buffer_size']:,}/"
+            f"{metrics['buffer_capacity']:,}"
+        )
+
+    def save(self, model="last"):
+        path = f"{self.name}_{model}.pt"
+        if self.params is not None:
+            path = f"{self.params}/{path}"
+        self.net.save(
+            path,
+            {"environment_steps": int(self.environment_steps)},
+        )
+
+    def load(self, model="last", required=False):
+        path = f"{self.name}_{model}.pt"
+        if self.params is not None:
+            path = f"{self.params}/{path}"
+        checkpoint = self.net.load(path)
+        if checkpoint is False:
+            if required:
+                raise FileNotFoundError(path)
+            return False
+        environment_steps = checkpoint.get("environment_steps", 0)
+        if (
+            isinstance(environment_steps, bool)
+            or not isinstance(environment_steps, int)
+            or environment_steps < 0
+        ):
+            raise ValueError(
+                "checkpoint environment_steps must be a non-negative integer"
+            )
+        self.environment_steps = environment_steps
+        self.soft_update(tau=1.0)
+        return True
 
     def soft_update(self, tau=None):
         super().soft_update(tau)
@@ -201,10 +278,8 @@ if __name__ == "__main__":
         device=device,
     )
     config = Config()
-    agent_name = "softqrdqn_breakout_v5"
-    agent = BreakoutSoftQRDQNAgent(
-        agent_name, q_network, config
-    )
+    agent_name = "qrdqn_breakout_v1"
+    agent = BreakoutQRDQNAgent(agent_name, q_network, config)
     checkpoint_loaded = agent.load(required=not bool(update))
     batch_size = 128
     training_metrics = agent.training_metrics()
@@ -222,9 +297,9 @@ if __name__ == "__main__":
         f"learning_starts={config.learning_starts:,}, epoch={config.epoch}, "
         f"n_step={config.n_step}, discount={config.discount}, "
         f"reward_scale={config.reward_scale}, tau={config.tau}, "
-        f"alpha={agent.alpha:.4f}, "
-        f"alpha_lr={config.alpha_lr}, "
-        f"target_entropy={agent.target_entropy:.3f}"
+        f"epsilon={agent.epsilon:.4f}, "
+        f"epsilon_end={config.epsilon_end}, "
+        f"epsilon_decay_steps={config.epsilon_decay_steps:,}"
     )
 
     reward_container = []
