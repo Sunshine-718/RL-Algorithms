@@ -239,7 +239,7 @@ if __name__ == "__main__":
         device=device,
     )
     config = Config()
-    agent_name = "softdqn_breakout_v5"
+    agent_name = "softdqn_breakout"
     agent = BreakoutSoftDQNAgent(
         agent_name, q_network, config
     )

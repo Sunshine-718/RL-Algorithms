@@ -202,7 +202,7 @@ if __name__ == "__main__":
         device=device,
     )
     config = Config()
-    agent_name = "softqrdqn_breakout_v6"
+    agent_name = "softqrdqn_breakout"
     agent = BreakoutSoftQRDQNAgent(
         agent_name, q_network, config
     )

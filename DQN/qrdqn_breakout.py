@@ -227,7 +227,7 @@ if __name__ == "__main__":
         device=device,
     )
     config = Config()
-    agent_name = "qrdqn_breakout_v2"
+    agent_name = "qrdqn_breakout"
     agent = BreakoutQRDQNAgent(agent_name, q_network, config)
     checkpoint_loaded = agent.load(required=not bool(update))
     batch_size = 128
