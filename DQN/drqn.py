@@ -42,8 +42,11 @@ class Config:
     discount: float = 0.99
     params: str = './params'
     tau: float = 5e-3
+    hard_update: bool = True
+    target_update_interval: int = 10_000
+    update_interval: int = 4
     capacity: int = 1_000_000
-    epoch: int = 10
+    epoch: int = 1
     noise: float = 0.2
     min_noise: float = 0.01
     decay: float = 0.998
@@ -205,7 +208,6 @@ class DRQNAgent(DQNAgentBase):
         self.params = config.params
         self.discount = config.discount
         self.epoch = config.epoch
-        self.tau = config.tau
         self.noise = config.noise
         self.min_noise = config.min_noise
         self.decay = config.decay
@@ -218,7 +220,7 @@ class DRQNAgent(DQNAgentBase):
         self.learning_starts = config.learning_starts
         self._n_step = 1
         self._action_hidden = None
-        self.soft_update(tau=1)
+        self.configure_updates(config)
         self.reset_hidden()
 
     @property
@@ -349,7 +351,7 @@ class DRQNAgent(DQNAgentBase):
                     self.net.parameters(), self.max_grad_norm
                 )
                 self.net.opt.step()
-                self.soft_update()
+                self.update_target_after_optimizer_step()
             self.decay_noise()
         return loss.item() if loss is not None else None
 
@@ -424,14 +426,15 @@ if __name__ == '__main__':
                         state.copy(), action, reward, next_state.copy(),
                         terminated, truncated,
                     ))
+                    if done:
+                        flush_episode(agent, episode_cache)
+                    for _ in range(agent.record_environment_steps()):
+                        loss = agent.step()
+                        if loss is not None:
+                            loss_container.append(loss)
+                    agent.update_target_after_environment_step()
                 state = next_state
                 episode_reward += reward
-
-            if bool(update):
-                flush_episode(agent, episode_cache)
-                loss = agent.step()
-                if loss is not None:
-                    loss_container.append(loss)
 
             reward_container.append(episode_reward)
             average_reward = float(np.mean(reward_container[-10:]))

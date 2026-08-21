@@ -14,7 +14,8 @@ from common import (
     ResidualBlock, NNBase, SoftDQNAgentBase,
     weighted_quantile_huber_loss,
     QuantileEmbedding, make_train_test_env, single_spaces, reset_env,
-    step_env, reset_done_envs, flush_episode,
+    step_env, reset_done_envs, store_n_step_transition,
+    flush_n_step_transitions,
 )
 
 
@@ -23,8 +24,11 @@ class Config:
     discount: float = 0.99
     params: str = './params'
     tau: float = 5e-3
+    hard_update: bool = True
+    target_update_interval: int = 10_000
+    update_interval: int = 4
     capacity: int = 1_000_000
-    epoch: int = 30
+    epoch: int = 1
     reward_scale: float = 1.
     n_step: int = 5
     alpha: float = 0.1
@@ -84,10 +88,9 @@ class SoftIQNAgent(SoftDQNAgentBase):
         self.epoch = config.epoch
         self.reward_scale = config.reward_scale
         self._n_step = config.n_step
-        self.tau = config.tau
         self.configure_alpha(config.alpha, lr=config.alpha_lr)
         self.target_entropy = float(np.log(Q.action_dim)) * 0.45
-        self.soft_update(tau=1)
+        self.configure_updates(config)
 
     def qr_tau(self, batch_size):
         return torch.rand(batch_size, 51).to(self.net.device).view(batch_size, -1)
@@ -172,7 +175,7 @@ class SoftIQNAgent(SoftDQNAgentBase):
                 nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.net.opt.step()
                 entropy = self._update_alpha(q)
-                self.soft_update()
+                self.update_target_after_optimizer_step()
             metrics = self.training_metrics(loss, entropy)
             return metrics["loss"]
         self.training_metrics()
@@ -230,16 +233,12 @@ if __name__ == "__main__":
                     float(rewards[env_id]), np.asarray(next_states[env_id]).copy(),
                     bool(terminated[env_id]), bool(truncated[env_id]),
                 ))
+                store_n_step_transition(agent, episode_caches[env_id])
             episode_rewards[env_id] += float(rewards[env_id])
             if not done[env_id]:
                 continue
             if bool(update):
-                flush_episode(agent, episode_caches[env_id])
-                if completed_episodes != 0:
-                    agent.step()
-                    training_metrics = agent.last_training_metrics
-                else:
-                    training_metrics = agent.training_metrics()
+                flush_n_step_transitions(agent, episode_caches[env_id])
             i = completed_episodes
             episode_reward_sum = float(episode_rewards[env_id])
             j = int(episode_lengths[env_id])
@@ -273,6 +272,11 @@ if __name__ == "__main__":
             completed_episodes += 1
             episode_rewards[env_id] = 0
             episode_lengths[env_id] = 0
+        if bool(update):
+            for _ in range(agent.record_environment_steps()):
+                agent.step()
+                training_metrics = agent.last_training_metrics
+            agent.update_target_after_environment_step()
         if completed_episodes >= total_episodes:
             break
         states = reset_done_envs(env, next_states, done, update)

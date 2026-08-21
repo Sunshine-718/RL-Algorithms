@@ -28,10 +28,11 @@ from carracing_env import (
 from common import (
     NNBase,
     SoftDQNAgentBase,
-    flush_episode,
+    flush_n_step_transitions,
     reset_done_envs,
     reset_env,
     single_spaces,
+    store_n_step_transition,
     step_env,
 )
 from image_replaybuffer import ImageReplayBuffer
@@ -42,9 +43,12 @@ class Config:
     discount: float = 0.99
     params: str = "./params"
     tau: float = 5e-3
+    hard_update: bool = True
+    target_update_interval: int = 10_000
+    update_interval: int = 4
     # Two uint8 frame stacks (state and next_state) use about 3.43 GiB here.
     capacity: int = 100_000
-    epoch: int = 30
+    epoch: int = 1
     reward_scale: float = 1.0
     n_step: int = 5
     alpha: float = 0.1
@@ -127,10 +131,9 @@ class CarRacingSoftDQNAgent(SoftDQNAgentBase):
         self.epoch = config.epoch
         self.reward_scale = config.reward_scale
         self._n_step = config.n_step
-        self.tau = config.tau
         self.configure_alpha(config.alpha, lr=config.alpha_lr)
         self.target_entropy = float(np.log(q_network.action_dim)) * 0.98
-        self.soft_update(tau=1.0)
+        self.configure_updates(config)
 
     @torch.no_grad()
     def action(self, state, deterministic=False):
@@ -194,7 +197,7 @@ class CarRacingSoftDQNAgent(SoftDQNAgentBase):
             self.net.opt.step()
 
             entropy = self._update_alpha(q_value)
-            self.soft_update()
+            self.update_target_after_optimizer_step()
 
         metrics = self.training_metrics(loss, entropy)
         return {"loss": metrics["loss"], "alpha": metrics["alpha"]}
@@ -263,14 +266,13 @@ if __name__ == "__main__":
                         bool(truncated[env_id]),
                     )
                 )
+                store_n_step_transition(agent, episode_caches[env_id])
             episode_rewards[env_id] += float(rewards[env_id])
             if not done[env_id]:
                 continue
 
             if bool(update):
-                flush_episode(agent, episode_caches[env_id])
-                agent.step()
-                training_metrics = agent.last_training_metrics
+                flush_n_step_transitions(agent, episode_caches[env_id])
 
             episode_index = completed_episodes
             episode_reward = float(episode_rewards[env_id])
@@ -308,6 +310,12 @@ if __name__ == "__main__":
             completed_episodes += 1
             episode_rewards[env_id] = 0.0
             episode_lengths[env_id] = 0
+
+        if bool(update):
+            for _ in range(agent.record_environment_steps()):
+                agent.step()
+                training_metrics = agent.last_training_metrics
+            agent.update_target_after_environment_step()
 
         if completed_episodes >= total_episodes:
             break

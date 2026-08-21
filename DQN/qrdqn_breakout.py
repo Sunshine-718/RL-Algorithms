@@ -26,11 +26,12 @@ from breakout_env import (
 from breakout_network import BreakoutQRDuelingNetwork
 from common import (
     DQNAgentBase,
-    flush_episode,
+    flush_n_step_transitions,
     quantile_huber_loss,
     reset_done_envs,
     reset_env,
     single_spaces,
+    store_n_step_transition,
     step_env,
 )
 from image_replaybuffer import ImageReplayBuffer
@@ -41,9 +42,12 @@ class Config:
     discount: float = 0.99
     params: str = "./params"
     tau: float = 5e-3
+    hard_update: bool = True
+    target_update_interval: int = 10_000
+    update_interval: int = 4
     # State and next-state frame stacks use about 26.29 GiB as uint8.
     capacity: int = 500_000
-    epoch: int = 30
+    epoch: int = 1
     learning_starts: int = 20_000
     reward_scale: float = 1.0
     n_step: int = 5
@@ -75,7 +79,6 @@ class BreakoutQRDQNAgent(DQNAgentBase):
         self.learning_starts = config.learning_starts
         self.reward_scale = config.reward_scale
         self._n_step = config.n_step
-        self.tau = config.tau
         self.noise = config.noise
         self.min_noise = config.min_noise
         self.decay = config.decay
@@ -86,7 +89,7 @@ class BreakoutQRDQNAgent(DQNAgentBase):
             device=q_network.device,
         ).view(1, -1)
         self.last_training_metrics = {}
-        self.soft_update(tau=1.0)
+        self.configure_updates(config)
 
     @torch.no_grad()
     def action(self, state, deterministic=False):
@@ -166,7 +169,7 @@ class BreakoutQRDQNAgent(DQNAgentBase):
             loss.backward()
             nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
             self.net.opt.step()
-            self.soft_update()
+            self.update_target_after_optimizer_step()
 
         self.decay_noise()
         self.training_metrics(loss)
@@ -244,7 +247,10 @@ if __name__ == "__main__":
         f"capacity={config.capacity:,}, batch_size={batch_size}, "
         f"learning_starts={config.learning_starts:,}, epoch={config.epoch}, "
         f"n_step={config.n_step}, discount={config.discount}, "
-        f"reward_scale={config.reward_scale}, tau={config.tau}, "
+        f"reward_scale={config.reward_scale}, "
+        f"hard_update={config.hard_update}, "
+        f"target_update_interval={config.target_update_interval:,}, "
+        f"update_interval={config.update_interval}, tau={config.tau}, "
         f"noise={agent.noise:.4f}, min_noise={config.min_noise}, "
         f"decay={config.decay}"
     )
@@ -286,14 +292,13 @@ if __name__ == "__main__":
                         bool(truncated[env_id]),
                     )
                 )
+                store_n_step_transition(agent, episode_caches[env_id])
             episode_rewards[env_id] += float(rewards[env_id])
             if not done[env_id]:
                 continue
 
             if bool(update):
-                flush_episode(agent, episode_caches[env_id])
-                agent.step(batch_size)
-                training_metrics = agent.last_training_metrics
+                flush_n_step_transitions(agent, episode_caches[env_id])
 
             episode_index = completed_episodes
             episode_reward = float(episode_rewards[env_id])
@@ -331,6 +336,12 @@ if __name__ == "__main__":
             completed_episodes += 1
             episode_rewards[env_id] = 0.0
             episode_lengths[env_id] = 0
+
+        if bool(update):
+            for _ in range(agent.record_environment_steps()):
+                agent.step(batch_size)
+                training_metrics = agent.last_training_metrics
+            agent.update_target_after_environment_step()
 
         if completed_episodes >= total_episodes:
             break

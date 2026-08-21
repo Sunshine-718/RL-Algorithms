@@ -12,7 +12,8 @@ from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
 from common import (
     ResidualBlock, NNBase, DQNAgentBase, make_train_test_env,
-    single_spaces, reset_env, step_env, reset_done_envs, flush_episode,
+    single_spaces, reset_env, step_env, reset_done_envs,
+    store_n_step_transition, flush_n_step_transitions,
 )
 import flappy_bird_gymnasium
 
@@ -22,8 +23,11 @@ class Config:
     discount: float = 0.99
     params: str = './params'
     tau: float = 5e-3
+    hard_update: bool = True
+    target_update_interval: int = 10_000
+    update_interval: int = 4
     capacity: int = 1_000_000
-    epoch: int = 30
+    epoch: int = 1
     reward_scale: float = 1.
     n_step: int = 5
     noise: float = 0.1
@@ -79,11 +83,10 @@ class DoubleDQNAgent(DQNAgentBase):
         self.epoch = config.epoch
         self.reward_scale = config.reward_scale
         self._n_step = config.n_step
-        self.tau = config.tau
         self.noise = config.noise
         self.min_noise = config.min_noise
         self.decay = config.decay
-        self.soft_update(tau=1)
+        self.configure_updates(config)
 
     @torch.no_grad()
     def action(self, state, deterministic=False):
@@ -129,7 +132,7 @@ class DoubleDQNAgent(DQNAgentBase):
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.net.opt.step()
-                self.soft_update()
+                self.update_target_after_optimizer_step()
             self.decay_noise()
         return loss.item() if loss is not None else None
 
@@ -180,13 +183,12 @@ if __name__ == "__main__":
                     float(rewards[env_id]), np.asarray(next_states[env_id]).copy(),
                     bool(terminated[env_id]), bool(truncated[env_id]),
                 ))
+                store_n_step_transition(agent, episode_caches[env_id])
             episode_rewards[env_id] += float(rewards[env_id])
             if not done[env_id]:
                 continue
             if bool(update):
-                flush_episode(agent, episode_caches[env_id])
-                if completed_episodes != 0:
-                    agent.step()
+                flush_n_step_transitions(agent, episode_caches[env_id])
             i = completed_episodes
             episode_reward_sum = float(episode_rewards[env_id])
             j = int(episode_lengths[env_id])
@@ -211,6 +213,10 @@ if __name__ == "__main__":
             completed_episodes += 1
             episode_rewards[env_id] = 0
             episode_lengths[env_id] = 0
+        if bool(update):
+            for _ in range(agent.record_environment_steps()):
+                agent.step()
+            agent.update_target_after_environment_step()
         if completed_episodes >= total_episodes:
             break
         states = reset_done_envs(env, next_states, done, update)

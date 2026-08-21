@@ -361,11 +361,12 @@ class SoftDQNFamilyTest(unittest.TestCase):
             self.assertTrue(legacy.load("legacy", required=True))
             self.assertAlmostEqual(legacy.alpha, 0.2)
 
-    def test_each_step_keeps_one_target_update_per_epoch(self):
+    def test_soft_update_option_keeps_one_target_update_per_epoch(self):
         agents = [*scalar_agent_cases(), make_qr_agent(), make_iqn_agent()]
 
         for agent in agents:
             with self.subTest(agent=type(agent).__name__):
+                agent.hard_update = False
                 agent.epoch = 2
                 for index in range(2):
                     state = np.asarray([index], dtype=np.uint8)

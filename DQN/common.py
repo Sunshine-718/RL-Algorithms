@@ -85,6 +85,36 @@ def flush_episode(agent, transitions):
     transitions.clear()
 
 
+def store_n_step_transition(agent, transitions, force=False):
+    """Store one mature n-step transition from one environment trajectory."""
+    if not transitions:
+        return False
+    if len(transitions) < agent.n_step and not force:
+        return False
+
+    horizon = min(agent.n_step, len(transitions))
+    reward = sum(
+        transitions[index][2] * agent.discount ** index
+        for index in range(horizon)
+    )
+    reward *= getattr(agent, 'reward_scale', 1.0)
+    state, action = transitions[0][:2]
+    next_state, terminated, truncated = transitions[horizon - 1][3:]
+    agent.buffer.store(
+        state, action, reward, next_state, terminated, truncated, horizon
+    )
+    transitions.pop(0)
+    return True
+
+
+def flush_n_step_transitions(agent, transitions):
+    """Store the shortened n-step tails when one environment ends."""
+    stored = 0
+    while transitions:
+        stored += int(store_n_step_transition(agent, transitions, force=True))
+    return stored
+
+
 def discrete_temperature_loss(
     log_alpha, log_probabilities, probabilities, target_entropy
 ):
@@ -219,6 +249,56 @@ class NNBase(nn.Module):
 
 
 class DQNAgentBase:
+    def configure_updates(self, config):
+        self.tau = float(config.tau)
+        self.hard_update = config.hard_update
+        self.target_update_interval = config.target_update_interval
+        self.update_interval = config.update_interval
+
+        if not isinstance(self.hard_update, (bool, np.bool_)):
+            raise TypeError('hard_update must be a bool')
+        for name in ('target_update_interval', 'update_interval'):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(
+                value, (int, np.integer)
+            ) or value < 1:
+                raise ValueError(f'{name} must be a positive integer')
+
+        self.target_update_interval = int(self.target_update_interval)
+        self.update_interval = int(self.update_interval)
+        self.environment_steps = 0
+        self._last_target_update_step = 0
+        self.soft_update(tau=1.0)
+
+    def record_environment_steps(self, count=1):
+        if isinstance(count, bool) or not isinstance(
+            count, (int, np.integer)
+        ) or count < 1:
+            raise ValueError('environment step count must be a positive integer')
+
+        previous_steps = self.environment_steps
+        self.environment_steps += int(count)
+        return (
+            self.environment_steps // self.update_interval
+            - previous_steps // self.update_interval
+        )
+
+    def update_target_after_optimizer_step(self):
+        if self.hard_update:
+            return False
+        self.soft_update()
+        return True
+
+    def update_target_after_environment_step(self):
+        if not self.hard_update:
+            return False
+        elapsed_steps = self.environment_steps - self._last_target_update_step
+        if elapsed_steps < self.target_update_interval:
+            return False
+        self.soft_update(tau=1.0)
+        self._last_target_update_step = self.environment_steps
+        return True
+
     @property
     def n_step(self):
         return self._n_step
@@ -265,6 +345,7 @@ class DQNAgentBase:
                     )
                 )
         self.soft_update(tau=1)
+        self._last_target_update_step = self.environment_steps
         return True
 
     def decay_noise(self, zero_noise=False):
