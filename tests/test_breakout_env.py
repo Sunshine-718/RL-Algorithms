@@ -15,7 +15,11 @@ for source_root in (REPOSITORY_ROOT, DQN_ROOT):
     if str(source_root) not in sys.path:
         sys.path.insert(0, str(source_root))
 
-from breakout_env import EpisodicLifeFire, LIFE_LOSS_REWARD
+from breakout_env import (
+    EpisodicLifeFire,
+    LIFE_LOSS_REWARD,
+    REPEAT_ACTION_PROBABILITY,
+)
 from qrdqn_breakout import BreakoutQRDQNAgent, Config
 
 
@@ -151,6 +155,11 @@ class BreakoutEvaluationExplorationTest(unittest.TestCase):
                 self.agent, self.state, epsilon=1e-3
             )
         self.assertEqual(action, 1)
+
+
+class BreakoutStickyActionTest(unittest.TestCase):
+    def test_classic_sticky_action_probability_is_enabled(self):
+        self.assertEqual(REPEAT_ACTION_PROBABILITY, 0.25)
 
 
 if __name__ == "__main__":
