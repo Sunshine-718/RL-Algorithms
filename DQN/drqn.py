@@ -48,7 +48,7 @@ class Config:
     capacity: int = 1_000_000
     epoch: int = 1
     noise: float = 0.2
-    min_noise: float = 0.01
+    min_noise: float = 0.1
     decay: float = 0.998
     burn_in: int = 10
     sequence_length: int = 20

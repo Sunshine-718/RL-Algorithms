@@ -53,7 +53,7 @@ class Config:
     reward_scale: float = 1.0
     n_step: int = 5
     noise: float = 0.5
-    min_noise: float = 0.01
+    min_noise: float = 0.1
     decay: float = 0.998
 
 
