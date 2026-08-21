@@ -20,7 +20,7 @@ from breakout_env import (
     LIFE_LOSS_REWARD,
     REPEAT_ACTION_PROBABILITY,
 )
-from qrdqn_breakout import BreakoutQRDQNAgent, Config
+from qrdqn_breakout import BreakoutQRDQNAgent
 
 
 class FakeALE:
@@ -112,54 +112,29 @@ class EpisodicLifeRewardTest(unittest.TestCase):
         self.assertEqual(info["life_loss_reward"], 0.0)
 
 
-class BreakoutEvaluationExplorationTest(unittest.TestCase):
-    def setUp(self):
-        self.agent = SimpleNamespace(
-            net=TinyQuantilePolicy(),
-            n_actions=3,
-            noise=0.5,
-        )
-        self.state = np.zeros((4, 84, 84), dtype=np.uint8)
-
-    def test_default_eval_epsilon_is_very_small(self):
-        self.assertEqual(Config().eval_epsilon, 1e-3)
-
-    def test_explicit_eval_epsilon_can_break_greedy_action(self):
-        with (
-            patch(
-                "qrdqn_breakout.np.random.random",
-                return_value=np.asarray([0.0005]),
-            ),
-            patch(
-                "qrdqn_breakout.np.random.randint",
-                return_value=np.asarray([2]),
-            ),
-        ):
-            action = BreakoutQRDQNAgent.action(
-                self.agent, self.state, epsilon=1e-3
-            )
-        self.assertEqual(action, 2)
-
-    def test_eval_epsilon_normally_keeps_greedy_action(self):
-        with (
-            patch(
-                "qrdqn_breakout.np.random.random",
-                return_value=np.asarray([0.002]),
-            ),
-            patch(
-                "qrdqn_breakout.np.random.randint",
-                return_value=np.asarray([2]),
-            ),
-        ):
-            action = BreakoutQRDQNAgent.action(
-                self.agent, self.state, epsilon=1e-3
-            )
-        self.assertEqual(action, 1)
-
-
 class BreakoutStickyActionTest(unittest.TestCase):
     def test_classic_sticky_action_probability_is_enabled(self):
         self.assertEqual(REPEAT_ACTION_PROBABILITY, 0.25)
+
+
+class BreakoutDeterministicEvaluationTest(unittest.TestCase):
+    def test_deterministic_action_does_not_sample_epsilon_greedy_noise(self):
+        agent = SimpleNamespace(
+            net=TinyQuantilePolicy(),
+            n_actions=3,
+            noise=1.0,
+        )
+        state = np.zeros((4, 84, 84), dtype=np.uint8)
+
+        with patch(
+            "qrdqn_breakout.np.random.random",
+            side_effect=AssertionError("eval must not sample policy noise"),
+        ):
+            action = BreakoutQRDQNAgent.action(
+                agent, state, deterministic=True
+            )
+
+        self.assertEqual(action, 1)
 
 
 if __name__ == "__main__":

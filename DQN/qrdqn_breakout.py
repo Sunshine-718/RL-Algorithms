@@ -54,7 +54,6 @@ class Config:
     n_step: int = 5
     noise: float = 0.5
     min_noise: float = 0.1
-    eval_epsilon: float = 1e-3
     decay: float = 0.998
 
 
@@ -83,9 +82,6 @@ class BreakoutQRDQNAgent(DQNAgentBase):
         self._n_step = config.n_step
         self.noise = config.noise
         self.min_noise = config.min_noise
-        self.eval_epsilon = float(config.eval_epsilon)
-        if not 0.0 <= self.eval_epsilon <= 1.0:
-            raise ValueError("eval_epsilon must be within [0, 1]")
         self.decay = config.decay
         self.qr_tau = torch.linspace(
             0.5 / q_network.num_quantiles,
@@ -97,7 +93,7 @@ class BreakoutQRDQNAgent(DQNAgentBase):
         self.configure_updates(config)
 
     @torch.no_grad()
-    def action(self, state, deterministic=False, epsilon=None):
+    def action(self, state, deterministic=False):
         state = np.asarray(state)
         single_state = state.ndim == len(self.net.obs_shape)
         state_tensor = torch.as_tensor(state, device=self.net.device)
@@ -113,10 +109,7 @@ class BreakoutQRDQNAgent(DQNAgentBase):
         if deterministic:
             actions = greedy_actions
         else:
-            epsilon = self.noise if epsilon is None else float(epsilon)
-            if not 0.0 <= epsilon <= 1.0:
-                raise ValueError("epsilon must be within [0, 1]")
-            explore = np.random.random(len(greedy_actions)) < epsilon
+            explore = np.random.random(len(greedy_actions)) < self.noise
             random_actions = np.random.randint(
                 0, self.n_actions, size=len(greedy_actions)
             )
@@ -261,7 +254,6 @@ if __name__ == "__main__":
         f"target_update_interval={config.target_update_interval:,}, "
         f"update_interval={config.update_interval}, tau={config.tau}, "
         f"noise={agent.noise:.4f}, min_noise={config.min_noise}, "
-        f"eval_epsilon={agent.eval_epsilon}, "
         f"decay={config.decay}"
     )
 
@@ -281,8 +273,7 @@ if __name__ == "__main__":
     completed_episodes = 0
 
     while completed_episodes < total_episodes:
-        epsilon = None if bool(update) else agent.eval_epsilon
-        actions = agent.action(states, epsilon=epsilon)
+        actions = agent.action(states, deterministic=not bool(update))
         next_states, rewards, terminated, truncated, _ = step_env(
             env, actions, update
         )
