@@ -17,6 +17,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 from breakout_env import (
     AGENT_ACTION_MEANINGS,
     FRAME_SKIP,
+    LIFE_LOSS_REWARD,
     NOOP_MAX,
     OBSERVATION_SHAPE,
     REPEAT_ACTION_PROBABILITY,
@@ -243,6 +244,7 @@ if __name__ == "__main__":
         f"noop_max={NOOP_MAX}, reward_clip=[-1, 1], "
         f"repeat_action_probability={REPEAT_ACTION_PROBABILITY}, "
         f"terminal_on_life_loss=True, "
+        f"life_loss_reward={LIFE_LOSS_REWARD}, "
         f"learning_rate={learning_rate}, num_quantiles={num_quantiles}, "
         f"capacity={config.capacity:,}, batch_size={batch_size}, "
         f"learning_starts={config.learning_starts:,}, epoch={config.epoch}, "

@@ -9,6 +9,7 @@ STACK_SIZE = 4
 NOOP_MAX = 30
 REPEAT_ACTION_PROBABILITY = 0.0
 AGENT_ACTION_MEANINGS = ("NOOP", "RIGHT", "LEFT")
+LIFE_LOSS_REWARD = -1.0
 
 
 gym.register_envs(ale_py)
@@ -105,12 +106,17 @@ class EpisodicLifeFire(gym.Wrapper):
         else:
             self.life_terminated = False
 
+        applied_life_loss_reward = LIFE_LOSS_REWARD if life_lost else 0.0
+        if life_lost:
+            reward = LIFE_LOSS_REWARD
+
         self.lives = lives
         info = dict(info)
         info.update(
             {
                 "life_lost": life_lost,
                 "life_terminal": life_terminal,
+                "life_loss_reward": applied_life_loss_reward,
                 "auto_fire": False,
             }
         )
