@@ -1,16 +1,22 @@
 import sys
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
+import torch
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-if str(REPOSITORY_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPOSITORY_ROOT))
+DQN_ROOT = REPOSITORY_ROOT / "DQN"
+for source_root in (REPOSITORY_ROOT, DQN_ROOT):
+    if str(source_root) not in sys.path:
+        sys.path.insert(0, str(source_root))
 
 from breakout_env import EpisodicLifeFire, LIFE_LOSS_REWARD
+from qrdqn_breakout import BreakoutQRDQNAgent, Config
 
 
 class FakeALE:
@@ -43,6 +49,17 @@ class FakeBreakoutEnv(gym.Env):
             False,
             {},
         )
+
+
+class TinyQuantilePolicy(torch.nn.Module):
+    obs_shape = (4, 84, 84)
+    device = torch.device("cpu")
+
+    def forward(self, state):
+        quantiles = torch.tensor(
+            [[0.0, 0.0], [2.0, 2.0], [1.0, 1.0]]
+        )
+        return quantiles.unsqueeze(0).expand(state.shape[0], -1, -1)
 
 
 class EpisodicLifeRewardTest(unittest.TestCase):
@@ -89,6 +106,51 @@ class EpisodicLifeRewardTest(unittest.TestCase):
         self.assertFalse(terminated)
         self.assertFalse(info["life_lost"])
         self.assertEqual(info["life_loss_reward"], 0.0)
+
+
+class BreakoutEvaluationExplorationTest(unittest.TestCase):
+    def setUp(self):
+        self.agent = SimpleNamespace(
+            net=TinyQuantilePolicy(),
+            n_actions=3,
+            noise=0.5,
+        )
+        self.state = np.zeros((4, 84, 84), dtype=np.uint8)
+
+    def test_default_eval_epsilon_is_very_small(self):
+        self.assertEqual(Config().eval_epsilon, 1e-3)
+
+    def test_explicit_eval_epsilon_can_break_greedy_action(self):
+        with (
+            patch(
+                "qrdqn_breakout.np.random.random",
+                return_value=np.asarray([0.0005]),
+            ),
+            patch(
+                "qrdqn_breakout.np.random.randint",
+                return_value=np.asarray([2]),
+            ),
+        ):
+            action = BreakoutQRDQNAgent.action(
+                self.agent, self.state, epsilon=1e-3
+            )
+        self.assertEqual(action, 2)
+
+    def test_eval_epsilon_normally_keeps_greedy_action(self):
+        with (
+            patch(
+                "qrdqn_breakout.np.random.random",
+                return_value=np.asarray([0.002]),
+            ),
+            patch(
+                "qrdqn_breakout.np.random.randint",
+                return_value=np.asarray([2]),
+            ),
+        ):
+            action = BreakoutQRDQNAgent.action(
+                self.agent, self.state, epsilon=1e-3
+            )
+        self.assertEqual(action, 1)
 
 
 if __name__ == "__main__":
