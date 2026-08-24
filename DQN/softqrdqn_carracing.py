@@ -53,21 +53,28 @@ class CarRacingQRDuelingNetwork(NNBase):
         super().__init__()
         self.features = nn.Sequential(
             nn.Conv2d(2, 32, kernel_size=8, stride=4),
+            nn.BatchNorm2d(32),
             nn.SiLU(inplace=True),
             nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.BatchNorm2d(64),
             nn.SiLU(inplace=True),
             nn.Conv2d(64, 64, kernel_size=3, stride=1),
+            nn.BatchNorm2d(64),
             nn.SiLU(inplace=True),
             nn.Flatten(),
         )
         self.feature_dim = self._feature_dim()
-        self.hidden = nn.Sequential(
+        self.value = nn.Sequential(
             nn.Linear(self.feature_dim, 512),
+            nn.RMSNorm(512),
             nn.SiLU(inplace=True),
+            nn.Linear(512, num_quantiles),
         )
-        self.value = nn.Linear(512, num_quantiles)
-        self.advantage = nn.Linear(
-            512, num_actions * num_quantiles
+        self.advantage = nn.Sequential(
+            nn.Linear(self.feature_dim, 512),
+            nn.RMSNorm(512),
+            nn.SiLU(inplace=True),
+            nn.Linear(512, num_actions * num_quantiles),
         )
         self.action_dim = num_actions
         self.num_quantiles = num_quantiles
@@ -80,8 +87,11 @@ class CarRacingQRDuelingNetwork(NNBase):
         self.to(self.device)
 
     def _feature_dim(self):
+        training = self.features.training
+        self.features.eval()
         with torch.no_grad():
             features = self.features(torch.zeros(1, *OBSERVATION_SHAPE))
+        self.features.train(training)
         return features.shape[1]
 
     @staticmethod
@@ -90,6 +100,9 @@ class CarRacingQRDuelingNetwork(NNBase):
             nn.init.orthogonal_(module.weight, gain=np.sqrt(2.0))
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.BatchNorm2d):
+            nn.init.ones_(module.weight)
+            nn.init.zeros_(module.bias)
 
     def forward(self, state):
         if state.ndim == len(self.obs_shape):
@@ -105,11 +118,11 @@ class CarRacingQRDuelingNetwork(NNBase):
             state = state.to(dtype=torch.float32)
 
         batch_size = state.shape[0]
-        hidden = self.hidden(self.features(state))
-        value = self.value(hidden).view(
+        features = self.features(state)
+        value = self.value(features).view(
             batch_size, 1, self.num_quantiles
         )
-        advantage = self.advantage(hidden).view(
+        advantage = self.advantage(features).view(
             batch_size, self.action_dim, self.num_quantiles
         )
         return value + advantage - advantage.mean(dim=1, keepdim=True)
@@ -235,6 +248,14 @@ class CarRacingSoftQRDQNAgent(SoftDQNAgentBase):
 
         metrics = self.training_metrics(loss, entropy)
         return {"loss": metrics["loss"], "alpha": metrics["alpha"]}
+
+    def soft_update(self, tau=None):
+        super().soft_update(tau)
+        # BatchNorm 的运行均值和方差不是参数，需要显式同步到目标网络。
+        for target_buffer, buffer in zip(
+            self.target_net.buffers(), self.net.buffers()
+        ):
+            target_buffer.copy_(buffer)
 
 
 if __name__ == "__main__":

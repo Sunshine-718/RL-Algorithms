@@ -73,6 +73,88 @@ class CarRacingSoftQRDQNTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "expected input shape"):
             network(torch.zeros(2, 3, 96, 96))
 
+    def test_cnn_and_dueling_heads_follow_requested_structure(self):
+        network = CarRacingQRDuelingNetwork(
+            lr=1e-4,
+            num_actions=5,
+            num_quantiles=7,
+            device="cpu",
+        )
+        feature_types = [type(module) for module in network.features]
+        self.assertEqual(
+            feature_types,
+            [
+                torch.nn.Conv2d,
+                torch.nn.BatchNorm2d,
+                torch.nn.SiLU,
+                torch.nn.Conv2d,
+                torch.nn.BatchNorm2d,
+                torch.nn.SiLU,
+                torch.nn.Conv2d,
+                torch.nn.BatchNorm2d,
+                torch.nn.SiLU,
+                torch.nn.Flatten,
+            ],
+        )
+        self.assertFalse(hasattr(network, "hidden"))
+        self.assertEqual(
+            [type(module) for module in network.value],
+            [
+                torch.nn.Linear,
+                torch.nn.RMSNorm,
+                torch.nn.SiLU,
+                torch.nn.Linear,
+            ],
+        )
+        self.assertEqual(
+            [type(module) for module in network.advantage],
+            [
+                torch.nn.Linear,
+                torch.nn.RMSNorm,
+                torch.nn.SiLU,
+                torch.nn.Linear,
+            ],
+        )
+        self.assertEqual(network.value[0].in_features, network.feature_dim)
+        self.assertEqual(network.value[0].out_features, 512)
+        self.assertEqual(network.value[-1].out_features, 7)
+        self.assertEqual(network.advantage[0].out_features, 512)
+        self.assertEqual(network.advantage[-1].out_features, 5 * 7)
+
+    def test_target_update_copies_batch_norm_buffers(self):
+        network = CarRacingQRDuelingNetwork(
+            lr=1e-4,
+            num_actions=5,
+            num_quantiles=7,
+            device="cpu",
+        )
+        agent = CarRacingSoftQRDQNAgent(
+            "softqrdqn_carracing_batch_norm_test",
+            network,
+            Config(params=None, capacity=1),
+        )
+        online_norm = agent.net.features[1]
+        target_norm = agent.target_net.features[1]
+        online_norm.running_mean.fill_(3.0)
+        online_norm.running_var.fill_(4.0)
+        online_norm.num_batches_tracked.fill_(5)
+        target_norm.running_mean.zero_()
+        target_norm.running_var.fill_(1.0)
+        target_norm.num_batches_tracked.zero_()
+
+        agent.soft_update(tau=0.5)
+
+        torch.testing.assert_close(
+            target_norm.running_mean, online_norm.running_mean
+        )
+        torch.testing.assert_close(
+            target_norm.running_var, online_norm.running_var
+        )
+        torch.testing.assert_close(
+            target_norm.num_batches_tracked,
+            online_norm.num_batches_tracked,
+        )
+
     def test_target_keeps_complete_action_quantile_distributions(self):
         agent = make_agent([[0.0, 10.0], [5.0, 5.0]])
         with torch.no_grad():
