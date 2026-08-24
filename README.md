@@ -80,6 +80,9 @@ Dreamer V2 按职责分为 `config.py`、`world_model.py`、`behavior.py`、
 可键盘控制的 BipedalWalker 训练与操作说明见
 [`SAC/COMMAND_BIPEDAL.md`](SAC/COMMAND_BIPEDAL.md)。
 
+QRSAC 输出关节目标、PD 执行低层控制的 BipedalWalker 实验见
+[`SAC/PD_BIPEDAL.md`](SAC/PD_BIPEDAL.md)。
+
 ## 依赖要求
 
 主要依赖：
