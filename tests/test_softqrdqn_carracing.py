@@ -2,6 +2,7 @@ import math
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -53,6 +54,22 @@ def make_agent(quantiles, epoch=1):
 
 
 class CarRacingSoftQRDQNTest(unittest.TestCase):
+    def test_convolution_and_linear_layers_use_kaiming_normal(self):
+        initializer = torch.nn.init.kaiming_normal_
+        with patch(
+            "softqrdqn_carracing.nn.init.kaiming_normal_",
+            wraps=initializer,
+        ) as kaiming_normal:
+            CarRacingQRDuelingNetwork(
+                lr=1e-4,
+                num_actions=5,
+                num_quantiles=7,
+                device="cpu",
+            )
+
+        # 3 个卷积层，加上 Value/Advantage 分支各 2 个线性层。
+        self.assertEqual(kaiming_normal.call_count, 7)
+
     def test_cnn_outputs_one_distribution_per_action(self):
         network = CarRacingQRDuelingNetwork(
             lr=1e-4,

@@ -97,7 +97,7 @@ class CarRacingQRDuelingNetwork(NNBase):
     @staticmethod
     def init_weights(module):
         if isinstance(module, (nn.Conv2d, nn.Linear)):
-            nn.init.orthogonal_(module.weight, gain=np.sqrt(2.0))
+            nn.init.kaiming_normal_(module.weight)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.BatchNorm2d):
