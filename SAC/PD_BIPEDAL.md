@@ -32,39 +32,18 @@ Kd = [0.15, 0.10, 0.15, 0.10]
 
 ## 运行
 
-短时检查：
-
-```bash
-python3 SAC/qrsac_pd_bipedalwalker.py \
-  --smoke-test \
-  --vector-mode sync \
-  --run-dir runs/qrsac_pd_smoke
-```
-
-正式训练默认持续运行，按 `Ctrl+C` 时保存 `last.pt`：
+训练入口沿用仓库中其他 QRSAC 文件的写法。文件底部的 `update = 1`
+表示训练，训练会持续运行，并在每个 episode 结束后保存参数：
 
 ```bash
 python3 SAC/qrsac_pd_bipedalwalker.py
 ```
 
-恢复训练：
+将 `update` 改为 `0` 后进行评估，评估要求 checkpoint 已存在：
 
 ```bash
-python3 SAC/qrsac_pd_bipedalwalker.py --resume
+python3 SAC/qrsac_pd_bipedalwalker.py
 ```
 
-无界面评估：
-
-```bash
-python3 SAC/qrsac_pd_bipedalwalker.py --evaluate --no-render
-```
-
-单独调整 hip 与 knee 增益：
-
-```bash
-python3 SAC/qrsac_pd_bipedalwalker.py \
-  --kp 2.5 2.0 2.5 2.0 \
-  --kd 0.18 0.12 0.18 0.12
-```
-
-不同 PD 增益会改变策略动作的实际含义。更换增益后应使用新的 `--run-dir`，不要恢复旧 checkpoint。
+PD 参数位于 `SAC/pd_bipedal_env.py` 的 `DEFAULT_KP` 和 `DEFAULT_KD`。
+不同 PD 增益会改变策略动作的实际含义，更换增益后不应继续加载旧参数。

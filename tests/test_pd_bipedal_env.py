@@ -14,7 +14,7 @@ if str(SAC_ROOT) not in sys.path:
 from pd_bipedal_env import (
     JOINT_LOWER_LIMITS,
     JOINT_UPPER_LIMITS,
-    PDController,
+    PD,
     make_pd_bipedal_env,
     normalized_action_to_target,
 )
@@ -22,13 +22,11 @@ from pd_bipedal_env import (
 
 class PDControllerTest(unittest.TestCase):
     def test_pd_formula_and_clipping(self):
-        controller = PDController(
-            kp=(2.0, 1.0, 2.0, 1.0),
-            kd=(0.5, 0.2, 0.5, 0.2),
-        )
+        controller = PD((2.0, 1.0, 2.0, 1.0),
+                        (0.5, 0.2, 0.5, 0.2))
         output = controller.update(
             target=(1.0, 0.0, -1.0, 0.5),
-            value=(0.0, 1.0, 0.0, 0.0),
+            var=(0.0, 1.0, 0.0, 0.0),
             velocity=(1.0, -1.0, -1.0, 1.0),
         )
         np.testing.assert_allclose(output, (1.0, -0.8, -1.0, 0.3))
