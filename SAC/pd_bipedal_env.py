@@ -6,8 +6,8 @@ from gymnasium.envs.box2d.bipedal_walker import BipedalWalker
 PD_ENV_ID = 'BipedalWalkerPD-v0'
 JOINT_LOWER_LIMITS = np.array([-0.8, -1.6, -0.8, -1.6], dtype=np.float32)
 JOINT_UPPER_LIMITS = np.array([1.1, -0.1, 1.1, -0.1], dtype=np.float32)
-DEFAULT_KP = np.array([2., 2., 2., 2.], dtype=np.float32)
-DEFAULT_KD = np.array([0.15, 0.1, 0.15, 0.1], dtype=np.float32)
+DEFAULT_KP = np.array([1.5, 1., 1.5, 1.], dtype=np.float32)
+DEFAULT_KD = np.array([0.12, 0.07, 0.12, 0.07], dtype=np.float32)
 
 
 class PD:
